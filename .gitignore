@@ -6,3 +6,5 @@ out/
 CMakeUserPresets.json
 *.user
 compile_commands.json
+tbs_test_*.ts
+tbs_test_*.bbf

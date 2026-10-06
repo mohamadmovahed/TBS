@@ -1,0 +1,19 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+# A static tbsdvb links libzmq privately; consumers must be able to find it too.
+if(NOT "@TBSDVB_BUILD_SHARED@" AND "@TBSDVB_ENABLE_ZMQ@")
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(TBS_ZMQ QUIET IMPORTED_TARGET libzmq)
+        if(TBS_ZMQ_FOUND AND NOT TARGET tbs::zmq)
+            add_library(tbs::zmq INTERFACE IMPORTED)
+            target_link_libraries(tbs::zmq INTERFACE PkgConfig::TBS_ZMQ)
+        endif()
+    endif()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/TbsDvbTargets.cmake")
+check_required_components(TbsDvb)

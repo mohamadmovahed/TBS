@@ -8,6 +8,8 @@
 
 #include "../tests/StreamBuilders.h"
 
+using tbs::BbHeader;
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

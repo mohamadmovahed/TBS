@@ -3,7 +3,7 @@
 // Helpers that synthesise the data formats the receiver consumes. Shared by the
 // unit tests and the tbs-make-test-stream tool.
 
-#include "core/BbHeader.h"
+#include "tbsdvb/BbHeader.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -12,6 +12,7 @@
 
 namespace builders {
 
+using tbs::BbHeader;
 using Bytes = std::vector<uint8_t>;
 
 inline Bytes makeTsPacket(uint16_t pid, uint8_t cc, uint8_t fill, bool pusi = false)

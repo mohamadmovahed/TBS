@@ -20,6 +20,29 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  library-only:
+    # The library must build without Qt
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DTBS_BUILD_GUI=OFF -DTBSDVB_ENABLE_ZMQ=OFF -DTBSDVB_BUILD_SHARED=ON
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  mingw-cross:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW-w64
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: Configure
+        run: cmake -S . -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake -DTBS_BUILD_GUI=OFF -DTBSDVB_ENABLE_ZMQ=OFF
+      - name: Build
+        run: cmake --build build-win -j
+
   macos:
     runs-on: macos-14
     steps:

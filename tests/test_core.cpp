@@ -1,16 +1,21 @@
 #include "StreamBuilders.h"
 
-#include "core/BbFrameExtractor.h"
-#include "core/BbFrameToTs.h"
-#include "core/BbHeader.h"
-#include "core/PlsUtil.h"
-#include "core/TsAnalyzer.h"
-#include "core/TunerConfig.h"
+#include "tbsdvb/BbFrameExtractor.h"
+#include "tbsdvb/BbFrameToTs.h"
+#include "tbsdvb/BbHeader.h"
+#include "tbsdvb/PlsUtil.h"
+#include "tbsdvb/TsAnalyzer.h"
+#include "tbsdvb/Types.h"
 
+#include "tbsdvb/Receiver.h"
+
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 using builders::Bytes;
+using namespace tbs;
 
 static int g_failures = 0;
 
@@ -67,7 +72,7 @@ static void testPls()
 
 static void testTunerConfig()
 {
-    TunerConfig c;
+    TuningParams c;
     c.lnbType = LnbType::Universal;
     c.frequencyMHz = 11494;
     CHECK_EQ(c.intermediateFrequencyKHz(), 1744000u);
@@ -222,6 +227,85 @@ static void testExtractorErrors()
     CHECK_EQ(n2, 3u);
 }
 
+// Library end to end: replay a pseudo-TS file through tbs::Receiver in BBFrame mode
+// and check frames, recovered TS, the file sink and the stats.
+static void testReceiverReplay()
+{
+    const auto packets = makeProgramPackets(3000);
+    const auto frames = builders::tsToBbFrames(packets, 5000);
+    const std::string in = "tbs_test_input.ts";
+    const std::string out = "tbs_test_output.bbf";
+    {
+        std::FILE *f = std::fopen(in.c_str(), "wb");
+        uint8_t cc = 0;
+        for (const Bytes &fr : frames)
+            for (const Bytes &p : builders::bbFrameToPseudoTs(fr, cc))
+                std::fwrite(p.data(), 1, 188, f);
+        std::fclose(f);
+    }
+
+    ReceiverConfig cfg;
+    cfg.device.kind = DeviceKind::FileReplay;
+    cfg.device.replayFile = in;
+    cfg.device.replayLoop = false;
+    cfg.capture = CaptureMode::BBFrame;
+    cfg.file.enabled = true;
+    cfg.file.path = out;
+    cfg.file.timestampSuffix = false;
+    cfg.file.bbFormat = BbFileFormat::Raw;
+
+    Receiver rx;
+    size_t gotFrames = 0;
+    Bytes previewTs;
+    std::string error = "none";
+    Receiver::Callbacks cb;
+    cb.onBbFrame = [&](const uint8_t *, size_t, const BbHeader &) { ++gotFrames; };
+    cb.onPreviewTs = [&](const uint8_t *p, size_t n) { previewTs.insert(previewTs.end(), p, p + n); };
+    cb.onStateChanged = [&](ReceiverState s, const std::string &e) {
+        if (s == ReceiverState::Stopped)
+            error = e;
+    };
+    rx.setCallbacks(cb);
+    rx.setPreviewEnabled(true);
+    rx.setStatusInterval(50);
+    CHECK(rx.start(cfg));
+    for (int i = 0; i < 200 && rx.isRunning(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    rx.stop();
+
+    CHECK(error.empty());
+    CHECK_EQ(gotFrames, frames.size());
+    CHECK_EQ(previewTs.size(), packets.size() * 188);
+    bool same = previewTs.size() == packets.size() * 188;
+    for (size_t i = 0; same && i < packets.size(); ++i)
+        same = std::memcmp(previewTs.data() + i * 188, packets[i].data(), 188) == 0;
+    CHECK(same);
+
+    size_t expectedBytes = 0;
+    for (const Bytes &fr : frames)
+        expectedBytes += fr.size();
+    std::FILE *f = std::fopen(out.c_str(), "rb");
+    CHECK(f != nullptr);
+    if (f) {
+        std::fseek(f, 0, SEEK_END);
+        CHECK_EQ(static_cast<size_t>(std::ftell(f)), expectedBytes);
+        std::fclose(f);
+    }
+    std::remove(in.c_str());
+    std::remove(out.c_str());
+
+    // Opening a missing file reports an error through the state callback
+    cfg.device.replayFile = "does_not_exist.ts";
+    cfg.file.enabled = false;
+    error.clear();
+    CHECK(rx.start(cfg));
+    for (int i = 0; i < 100 && rx.isRunning(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    rx.stop();
+    CHECK(!error.empty());
+    CHECK(!rx.lastError().empty());
+}
+
 int main()
 {
     testCrc8();
@@ -233,6 +317,7 @@ int main()
     testRoundTrip(true, 7264);
     testRoundTrip(true, 333);
     testExtractorErrors();
+    testReceiverReplay();
 
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
