@@ -31,6 +31,7 @@ void usage(const char *argv0)
     std::printf(
         "Usage: %s [options]\n"
         "  --list                      list receivers and exit\n"
+        "  --diagnose                  check driver / device setup for --device and exit\n"
         "Device:\n"
         "  --device linux:A[:F[:D]]    Linux DVB adapter A, frontend F, demux D\n"
         "  --device bda:N|bda:PATH     Windows BDA tuner by index or device path\n"
@@ -101,6 +102,7 @@ int main(int argc, char **argv)
     tbs::ReceiverConfig cfg;
     double duration = 0;
     bool quiet = false;
+    bool diagnoseOnly = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -118,6 +120,8 @@ int main(int argc, char **argv)
             for (const auto &d : tbs::Devices::enumerate(false))
                 std::printf("%-7s %s\n        %s\n", kindName(d.kind).c_str(), d.label().c_str(), d.path.c_str());
             return 0;
+        } else if (a == "--diagnose") {
+            diagnoseOnly = true;
         } else if (a == "--device") {
             if (!parseDevice(next(), cfg.device)) {
                 std::fprintf(stderr, "bad --device value\n");
@@ -194,6 +198,16 @@ int main(int argc, char **argv)
             usage(argv[0]);
             return 2;
         }
+    }
+
+    if (diagnoseOnly) {
+        const auto items = tbs::Devices::diagnose(cfg.device);
+        std::printf("%s", tbs::Devices::formatDiagnostics(items).c_str());
+        for (const auto &i : items) {
+            if (i.level == tbs::DiagnosticItem::Level::Error)
+                return 1;
+        }
+        return 0;
     }
 
     std::signal(SIGINT, onSignal);

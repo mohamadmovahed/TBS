@@ -39,6 +39,11 @@ if(TBS_BUILD_TESTS)
     enable_testing()
     add_executable(tbs-tests tests/test_core.cpp tests/StreamBuilders.h)
     target_link_libraries(tbs-tests PRIVATE TbsDvb::tbsdvb)
+    # White-box tests use the library's private headers; a shared build hides those symbols
+    target_include_directories(tbs-tests PRIVATE libtbsdvb/src)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT TBSDVB_BUILD_SHARED)
+        target_compile_definitions(tbs-tests PRIVATE TBS_TEST_LINUX_INTERNALS=1)
+    endif()
     add_test(NAME tbsdvb-core COMMAND tbs-tests)
 endif()
 

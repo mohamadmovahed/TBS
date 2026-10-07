@@ -56,9 +56,14 @@ TuningPanel::TuningPanel(QWidget *parent)
     m_rescan->setObjectName(QStringLiteral("Ghost"));
     m_rescan->setIcon(Theme::icon(QStringLiteral("refresh"), Theme::tokens().ink2));
     m_rescan->setToolTip(tr("Rescan receivers"));
+    m_diagnose = new QPushButton(tr("Diagnose"));
+    m_diagnose->setObjectName(QStringLiteral("Ghost"));
+    m_diagnose->setToolTip(tr("Check the driver and device setup for the selected receiver"));
     devRow->addWidget(m_device, 1);
     devRow->addWidget(m_rescan);
+    devRow->addWidget(m_diagnose);
     root->addLayout(devRow);
+    connect(m_diagnose, &QPushButton::clicked, this, &TuningPanel::diagnoseRequested);
 
     m_dvbBox = new QWidget;
     auto *dvbForm = makeForm();

@@ -6,6 +6,10 @@
 #include <cerrno>
 #include <cstring>
 #include <dirent.h>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <linux/dvb/dmx.h>
 #include <linux/dvb/frontend.h>
@@ -120,9 +124,21 @@ bool LinuxDvbDevice::open(const DeviceSelection &sel, const TuningParams &tuning
     const std::string fePath = frontendPath(sel.adapter, sel.frontend);
     m_fe = ::open(fePath.c_str(), O_RDWR | O_NONBLOCK);
     if (m_fe < 0) {
+        const int err = errno;
         if (error)
-            *error = util::format("Cannot open %s: %s (is the TBS driver loaded and the device free?)", fePath.c_str(),
-                                  errnoString().c_str());
+            *error = util::format("Cannot open %s: %s", fePath.c_str(), std::strerror(err));
+        if (err == ENOENT || err == EACCES || err == EPERM) {
+            log("Running diagnostics:");
+            const std::string report = Devices::formatDiagnostics(diagnose(sel));
+            size_t pos = 0;
+            while (pos < report.size()) {
+                const size_t nl = report.find('\n', pos);
+                log(report.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos));
+                pos = nl == std::string::npos ? report.size() : nl + 1;
+            }
+        } else if (err == EBUSY) {
+            log("The frontend is in use by another program (tvheadend, another tbs-receiver, ...).");
+        }
         return false;
     }
 
@@ -459,6 +475,197 @@ void LinuxDvbDevice::close()
         m_fe = -1;
     }
     m_haveBerCounters = false;
+}
+
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string readTrimmed(const std::string &path)
+{
+    std::ifstream f(path);
+    if (!f)
+        return {};
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string s = ss.str();
+    while (!s.empty() && (s.back() == '\n' || s.back() == ' ' || s.back() == '\r'))
+        s.pop_back();
+    return s;
+}
+
+unsigned long hexValue(const std::string &s)
+{
+    return std::strtoul(s.c_str(), nullptr, 16);
+}
+
+bool moduleLoaded(const std::string &modules, const char *name)
+{
+    std::istringstream in(modules);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.compare(0, std::strlen(name), name) == 0 && line.size() > std::strlen(name) && line[std::strlen(name)] == ' ')
+            return true;
+    }
+    return false;
+}
+
+// Looks for <name>.ko, .ko.xz, .ko.zst or .ko.gz below dir
+std::string findModuleFile(const std::string &dir, const std::string &name)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        const std::string fn = it->path().filename().string();
+        if (fn == name + ".ko" || fn == name + ".ko.xz" || fn == name + ".ko.zst" || fn == name + ".ko.gz")
+            return it->path().string();
+    }
+    return {};
+}
+
+} // namespace
+
+std::vector<DiagnosticItem> LinuxDvbDevice::diagnose(const DeviceSelection &sel, const std::string &root)
+{
+    using L = DiagnosticItem::Level;
+    std::vector<DiagnosticItem> out;
+
+    const std::string release = readTrimmed(root + "/proc/sys/kernel/osrelease");
+    out.push_back({L::Info, "Running kernel " + (release.empty() ? std::string("(unknown)") : release), {}});
+
+    // 1. The card on the PCI bus (TBS ECP3 bridge 544d:6178; TBS 6903x subsystem 6903:0020/0021/8888)
+    bool cardFound = false;
+    bool cardBound = false;
+    const std::string pciDir = root + "/sys/bus/pci/devices";
+    if (DIR *d = ::opendir(pciDir.c_str())) {
+        std::vector<std::string> names;
+        while (dirent *e = ::readdir(d)) {
+            if (e->d_name[0] != '.')
+                names.push_back(e->d_name);
+        }
+        ::closedir(d);
+        std::sort(names.begin(), names.end());
+        for (const std::string &n : names) {
+            const std::string dev = pciDir + "/" + n;
+            if (hexValue(readTrimmed(dev + "/vendor")) != 0x544d || hexValue(readTrimmed(dev + "/device")) != 0x6178)
+                continue;
+            cardFound = true;
+            const unsigned long sv = hexValue(readTrimmed(dev + "/subsystem_vendor"));
+            const unsigned long sd = hexValue(readTrimmed(dev + "/subsystem_device"));
+            const bool is6903x = sv == 0x6903 && (sd == 0x0020 || sd == 0x0021 || sd == 0x8888);
+            const std::string board = is6903x ? std::string("TBS 6903x") : util::format("TBS card %04lx:%04lx", sv, sd);
+            std::error_code ec;
+            const auto link = std::filesystem::read_symlink(dev + "/driver", ec);
+            const std::string driver = ec ? std::string() : link.filename().string();
+            if (driver.empty()) {
+                out.push_back({L::Error, board + " found at PCI " + n + " but no driver is bound to it",
+                               "The tbsecp3 module is not loaded or rejected the card. Run 'sudo modprobe tbsecp3' and "
+                               "check 'sudo dmesg | grep -i -E \"tbs|stid135|ecp3\"'."});
+            } else {
+                cardBound = cardBound || driver == "tbsecp3";
+                out.push_back({driver == "tbsecp3" ? L::Ok : L::Warning,
+                               board + " found at PCI " + n + ", driver: " + driver,
+                               driver == "tbsecp3" ? std::string()
+                                                   : "Expected the TBS 'tbsecp3' driver; another driver has claimed the card."});
+            }
+        }
+    }
+    if (!cardFound) {
+        out.push_back({L::Error, "No TBS PCIe card found on the PCI bus (vendor:device 544d:6178)",
+                       "Check 'lspci -nn | grep -i 544d'. If nothing is listed, reseat the card, try another slot, "
+                       "and check the BIOS (PCIe slot enabled). In a VM or container the card must be passed through."});
+    }
+
+    // 2. Kernel modules
+    const std::string modules = readTrimmed(root + "/proc/modules");
+    const bool coreLoaded = moduleLoaded(modules, "dvb_core");
+    const bool ecp3Loaded = moduleLoaded(modules, "tbsecp3");
+    const bool stidLoaded = moduleLoaded(modules, "stid135");
+    out.push_back({coreLoaded ? L::Ok : L::Error, std::string("Module dvb_core ") + (coreLoaded ? "loaded" : "not loaded"), {}});
+    out.push_back({ecp3Loaded ? L::Ok : L::Error, std::string("Module tbsecp3 ") + (ecp3Loaded ? "loaded" : "not loaded"), {}});
+    out.push_back({stidLoaded ? L::Ok : (ecp3Loaded ? L::Warning : L::Error),
+                   std::string("Module stid135 (TBS 6903x demodulator) ") + (stidLoaded ? "loaded" : "not loaded"), {}});
+
+    if (!ecp3Loaded && !release.empty()) {
+        const std::string file = findModuleFile(root + "/lib/modules/" + release, "tbsecp3");
+        if (file.empty()) {
+            out.push_back({L::Error, "tbsecp3 is not installed for the running kernel " + release,
+                           "The TBS driver must be built for this exact kernel. If the kernel was updated after "
+                           "installing the driver, rebuild it in tbsdtv/media_build ('make dir DIR=../media', "
+                           "'make allyesconfig', 'make -j4', 'sudo make install') and reboot."});
+        } else {
+            out.push_back({L::Warning, "tbsecp3 is installed (" + file + ") but not loaded",
+                           "Run 'sudo modprobe tbsecp3' and read the error, or 'sudo dmesg | tail -50'. "
+                           "'Key was rejected by service' or 'Required key not available' means Secure Boot is "
+                           "blocking the unsigned module. 'Unknown symbol' means the TBS modules were mixed with the "
+                           "distribution's media modules: reinstall the TBS driver and reboot."});
+        }
+    }
+
+    // 3. Secure Boot blocks unsigned out-of-tree modules
+    const std::string sb = root + "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
+    {
+        std::ifstream f(sb, std::ios::binary);
+        if (f) {
+            std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            const bool on = !bytes.empty() && bytes.back() == 1;
+            out.push_back({on && !ecp3Loaded ? L::Warning : L::Info, std::string("Secure Boot ") + (on ? "enabled" : "disabled"),
+                           on && !ecp3Loaded ? "Unsigned TBS modules will not load. Disable Secure Boot in the firmware "
+                                               "setup, or sign the modules and enrol the key with mokutil."
+                                             : std::string()});
+        }
+    }
+
+    // 4. Device nodes
+    const std::string dvbDir = root + "/dev/dvb";
+    const std::vector<int> adapters = listNumbered(dvbDir, "adapter");
+    if (adapters.empty()) {
+        out.push_back({L::Error, "/dev/dvb has no adapters",
+                       cardBound ? "The driver is bound but created no DVB adapter: check 'sudo dmesg | grep -i -E "
+                                   "\"tbs|stid135|dvb\"' for frontend attach errors."
+                                 : "The device nodes appear once the TBS driver has loaded and attached the card (see above)."});
+    } else {
+        for (int a : adapters) {
+            std::string fes;
+            for (int f : listNumbered(util::format("%s/adapter%d", dvbDir.c_str(), a), "frontend"))
+                fes += (fes.empty() ? "" : ", ") + util::format("frontend%d", f);
+            out.push_back({L::Ok, util::format("/dev/dvb/adapter%d: %s", a, fes.empty() ? "no frontend" : fes.c_str()), {}});
+        }
+    }
+
+    // 5. The selected frontend and demux
+    if (!adapters.empty()) {
+        const std::string fe = util::format("%s/adapter%d/frontend%d", dvbDir.c_str(), sel.adapter, sel.frontend);
+        const std::string dmx = util::format("%s/adapter%d/demux%d", dvbDir.c_str(), sel.adapter, sel.demux);
+        for (const std::string &node : {fe, dmx}) {
+            const std::string shown = node.substr(root.size());
+            struct stat st;
+            if (::stat(node.c_str(), &st) != 0) {
+                out.push_back({L::Error, shown + " does not exist",
+                               "Select one of the adapters/frontends listed above (the TBS 6903x has two tuners, "
+                               "usually adapterN/frontend0 and adapterN+1/frontend0)."});
+            } else if (::access(node.c_str(), R_OK | W_OK) != 0) {
+                out.push_back({L::Error, shown + ": permission denied for this user",
+                               "Add yourself to the 'video' group ('sudo usermod -aG video $USER'), then log out and "
+                               "back in. Check with 'ls -l /dev/dvb/adapter*'."});
+            } else {
+                out.push_back({L::Ok, shown + " is accessible", {}});
+            }
+        }
+    }
+
+    // 6. BBFrame mode
+    const std::string bb = readTrimmed(root + "/sys/module/stid135/parameters/bbframe");
+    if (!bb.empty())
+        out.push_back({L::Info, "stid135 bbframe=" + bb,
+                       bb == "0" ? "For BBFrame capture add 'options stid135 bbframe=1' to /etc/modprobe.d/stid135.conf "
+                                   "and reload the driver."
+                                 : std::string()});
+    return out;
 }
 
 } // namespace tbs

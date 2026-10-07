@@ -32,6 +32,7 @@ public slots:
 signals:
     void captureModeChanged();
     void tuningEdited();
+    void diagnoseRequested();
 
 private slots:
     void onDeviceChanged();
@@ -46,6 +47,7 @@ private:
 
     QComboBox *m_device = nullptr;
     QPushButton *m_rescan = nullptr;
+    QPushButton *m_diagnose = nullptr;
     QWidget *m_dvbBox = nullptr;
     QSpinBox *m_adapter = nullptr;
     QSpinBox *m_frontend = nullptr;

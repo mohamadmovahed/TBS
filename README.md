@@ -62,6 +62,36 @@ Install the TBS BDA driver for the card. The library and tools can also be cross
 **macOS**: `brew install cmake qt zeromq ffmpeg pkg-config`, then configure with
 `-DCMAKE_PREFIX_PATH="$(brew --prefix qt)"`. TBS has no macOS driver, so only file replay works on macOS.
 
+## Troubleshooting: "Cannot open /dev/dvb/adapter0/frontend0"
+
+Run the built-in check. It prints the cause and what to do:
+
+```sh
+./build/tbs-cli --diagnose --device linux:0:0
+```
+In the GUI, press **Diagnose** next to the receiver list. The checks also run automatically when opening a
+frontend fails, and the results appear in the **Log** tab.
+
+The same checks by hand, in order:
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Card visible on PCI | `lspci -nnk \| grep -A3 544d` | `544d:6178`, `Kernel driver in use: tbsecp3` |
+| Modules loaded | `lsmod \| grep -E "tbsecp3\|stid135\|dvb_core"` | all three |
+| Driver built for this kernel | `modinfo tbsecp3 \| grep vermagic` vs `uname -r` | same version |
+| Load errors | `sudo modprobe tbsecp3; sudo dmesg \| grep -iE "tbs\|stid135\|dvb"` | adapters registered |
+| Device nodes | `ls -l /dev/dvb/adapter*/` | `frontend0`, `demux0`, `dvr0` |
+| Permissions | `groups` | includes `video` |
+
+Common causes:
+- **Kernel updated after installing the driver.** Rebuild and reinstall the TBS media_build, then reboot.
+- **Secure Boot is on.** `dmesg` shows "Key was rejected by service". Disable Secure Boot, or sign the modules.
+- **The distribution's media modules are mixed with the TBS ones.** `dmesg` shows "Unknown symbol". Reinstall
+  the TBS driver and reboot.
+- **No permission.** Run `sudo usermod -aG video $USER`, then log out and back in.
+- **Wrong numbers.** Each 6903x tuner is its own adapter, for example `adapter0/frontend0` and
+  `adapter1/frontend0`. Other DVB cards shift the numbers, so use the list in the GUI or `tbs-cli --list`.
+
 ## Using the library
 
 Link `TbsDvb::tbsdvb`. Either add the source tree with `add_subdirectory(libtbsdvb)`, or run `cmake --install`

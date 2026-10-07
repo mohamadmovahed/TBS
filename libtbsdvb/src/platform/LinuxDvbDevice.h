@@ -15,6 +15,8 @@ public:
     ~LinuxDvbDevice() override;
 
     static std::vector<DeviceInfo> enumerate();
+    // rootPrefix lets tests run the checks against a fake /sys, /proc, /dev and /lib tree
+    static std::vector<DiagnosticItem> diagnose(const DeviceSelection &sel, const std::string &rootPrefix = std::string());
 
     std::string name() const override { return m_name; }
     bool open(const DeviceSelection &sel, const TuningParams &tuning, CaptureMode mode, std::string *error) override;

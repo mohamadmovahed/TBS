@@ -243,6 +243,7 @@ QWidget *MainWindow::buildSidebar()
         m_overview->setBbFrameMode(cfg.capture == tbs::CaptureMode::BBFrame);
     });
     connect(m_output, &OutputPanel::videoPreviewToggled, this, &MainWindow::setPreview);
+    connect(m_tuning, &TuningPanel::diagnoseRequested, this, &MainWindow::runDiagnostics);
     return side;
 }
 
@@ -288,6 +289,7 @@ QWidget *MainWindow::buildMain()
 
     // Details
     auto *tabs = new QTabWidget;
+    m_tabs = tabs;
     tabs->setDocumentMode(true);
     m_overview = new OverviewPanel;
     m_pids = new PidTable;
@@ -488,6 +490,7 @@ void MainWindow::onStateChanged(int state, const QString &error)
     if (!error.isEmpty()) {
         m_hadError = true;
         m_statusText->setText(error);
+        m_tabs->setCurrentIndex(2); // the log holds the diagnostics
     }
     if (s == tbs::ReceiverState::Running) {
         m_pill->setState(StatusPill::Kind::Warning, tr("SEARCHING"));
@@ -586,6 +589,37 @@ void MainWindow::appendLog(const QString &message)
     m_log->appendHtml(QStringLiteral("<span style='color:%1'>%2</span>&nbsp;&nbsp;%3<span style='color:%4'>%5</span>")
                           .arg(t.muted.name(), QTime::currentTime().toString(QStringLiteral("HH:mm:ss.zzz")), marker,
                                t.ink.name(), message.toHtmlEscaped()));
+}
+
+void MainWindow::runDiagnostics()
+{
+    const tbs::ReceiverConfig cfg = currentConfig();
+    appendLog(tr("Diagnostics for %1:").arg(deviceText(cfg.device)));
+    const auto items = tbs::Devices::diagnose(cfg.device);
+    bool ok = true;
+    for (const auto &i : items) {
+        const char *tag = "";
+        switch (i.level) {
+        case tbs::DiagnosticItem::Level::Ok:
+            tag = "OK      ";
+            break;
+        case tbs::DiagnosticItem::Level::Info:
+            tag = "INFO    ";
+            break;
+        case tbs::DiagnosticItem::Level::Warning:
+            tag = "WARNING ";
+            break;
+        case tbs::DiagnosticItem::Level::Error:
+            tag = "ERROR   ";
+            ok = false;
+            break;
+        }
+        appendLog(QString::fromLatin1(tag) + QString::fromStdString(i.message));
+        if (!i.hint.empty())
+            appendLog(QStringLiteral("        → ") + QString::fromStdString(i.hint));
+    }
+    appendLog(ok ? tr("Diagnostics: no problems found") : tr("Diagnostics: problems found, see the hints above"));
+    m_tabs->setCurrentIndex(2);
 }
 
 // ---------------------------------------------------------------------------

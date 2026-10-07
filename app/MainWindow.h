@@ -43,6 +43,7 @@ private slots:
     void appendLog(const QString &message);
     void toggleTheme();
     void setPreview(bool on);
+    void runDiagnostics();
 
 private:
     QWidget *buildHeader();
@@ -88,5 +89,6 @@ private:
     OverviewPanel *m_overview = nullptr;
     PidTable *m_pids = nullptr;
     QPlainTextEdit *m_log = nullptr;
+    class QTabWidget *m_tabs = nullptr;
     QLabel *m_statusText = nullptr;
 };

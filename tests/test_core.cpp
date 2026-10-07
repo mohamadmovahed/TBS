@@ -10,6 +10,8 @@
 #include "tbsdvb/Receiver.h"
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -306,6 +308,67 @@ static void testReceiverReplay()
     CHECK(!rx.lastError().empty());
 }
 
+#if defined(TBS_TEST_LINUX_INTERNALS)
+#include "platform/LinuxDvbDevice.h"
+
+// Linux diagnostics against fake /sys, /proc, /dev and /lib trees
+static void testLinuxDiagnostics()
+{
+    namespace fs = std::filesystem;
+    const fs::path root = fs::absolute("tbs_test_root");
+    auto write = [&](const std::string &rel, const std::string &content) {
+        fs::create_directories((root / rel).parent_path());
+        std::ofstream(root / rel) << content;
+    };
+    auto has = [](const std::vector<DiagnosticItem> &items, DiagnosticItem::Level level, const std::string &text) {
+        for (const auto &i : items)
+            if (i.level == level && i.message.find(text) != std::string::npos)
+                return true;
+        return false;
+    };
+    DeviceSelection sel;
+
+    // Card present, no driver bound, module installed but not loaded, no /dev/dvb
+    fs::remove_all(root);
+    write("proc/sys/kernel/osrelease", "6.1.0-test\n");
+    write("proc/modules", "snd 1 0 - Live 0x0\n");
+    const std::string pci = "sys/bus/pci/devices/0000:03:00.0/";
+    write(pci + "vendor", "0x544d\n");
+    write(pci + "device", "0x6178\n");
+    write(pci + "subsystem_vendor", "0x6903\n");
+    write(pci + "subsystem_device", "0x0021\n");
+    write("lib/modules/6.1.0-test/updates/tbsecp3.ko.xz", "");
+    auto items = LinuxDvbDevice::diagnose(sel, root.string());
+    CHECK(has(items, DiagnosticItem::Level::Error, "TBS 6903x found at PCI 0000:03:00.0 but no driver"));
+    CHECK(has(items, DiagnosticItem::Level::Warning, "tbsecp3 is installed"));
+    CHECK(has(items, DiagnosticItem::Level::Error, "/dev/dvb has no adapters"));
+
+    // Module missing for the running kernel
+    fs::remove(root / "lib/modules/6.1.0-test/updates/tbsecp3.ko.xz");
+    items = LinuxDvbDevice::diagnose(sel, root.string());
+    CHECK(has(items, DiagnosticItem::Level::Error, "not installed for the running kernel 6.1.0-test"));
+
+    // Everything in place; the user asks for a frontend that does not exist
+    write("proc/modules", "stid135 1 0 - Live 0x0\ntbsecp3 1 0 - Live 0x0\ndvb_core 1 0 - Live 0x0\n");
+    fs::create_directories(root / "sys/bus/pci/drivers/tbsecp3");
+    fs::create_directory_symlink(root / "sys/bus/pci/drivers/tbsecp3", root / pci / "driver");
+    write("dev/dvb/adapter0/frontend0", "");
+    write("dev/dvb/adapter0/demux0", "");
+    write("dev/dvb/adapter1/frontend0", "");
+    write("sys/module/stid135/parameters/bbframe", "0\n");
+    items = LinuxDvbDevice::diagnose(sel, root.string());
+    CHECK(has(items, DiagnosticItem::Level::Ok, "TBS 6903x found at PCI 0000:03:00.0, driver: tbsecp3"));
+    CHECK(has(items, DiagnosticItem::Level::Ok, "Module tbsecp3 loaded"));
+    CHECK(has(items, DiagnosticItem::Level::Ok, "/dev/dvb/adapter0/frontend0 is accessible"));
+    CHECK(has(items, DiagnosticItem::Level::Info, "stid135 bbframe=0"));
+    sel.adapter = 2;
+    items = LinuxDvbDevice::diagnose(sel, root.string());
+    CHECK(has(items, DiagnosticItem::Level::Error, "/dev/dvb/adapter2/frontend0 does not exist"));
+    CHECK(!Devices::formatDiagnostics(items).empty());
+    fs::remove_all(root);
+}
+#endif
+
 int main()
 {
     testCrc8();
@@ -318,6 +381,9 @@ int main()
     testRoundTrip(true, 333);
     testExtractorErrors();
     testReceiverReplay();
+#if defined(TBS_TEST_LINUX_INTERNALS)
+    testLinuxDiagnostics();
+#endif
 
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);

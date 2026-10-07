@@ -8,3 +8,4 @@ CMakeUserPresets.json
 compile_commands.json
 tbs_test_*.ts
 tbs_test_*.bbf
+tbs_test_root/

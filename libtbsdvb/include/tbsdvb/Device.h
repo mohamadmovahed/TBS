@@ -53,6 +53,15 @@ private:
     LogFn m_log;
 };
 
+// One finding of Devices::diagnose()
+struct TBSDVB_API DiagnosticItem
+{
+    enum class Level { Ok, Info, Warning, Error };
+    Level level = Level::Info;
+    std::string message;
+    std::string hint; // what to do about it (may be empty)
+};
+
 namespace Devices {
 
 // Receivers present on this machine. The replay pseudo-device is appended when includeReplay is set.
@@ -62,6 +71,13 @@ TBSDVB_API std::vector<DeviceInfo> enumerate(bool includeReplay = true);
 TBSDVB_API bool isSupported(DeviceKind kind);
 
 TBSDVB_API std::unique_ptr<ITunerDevice> create(DeviceKind kind, std::string *error = nullptr);
+
+// Checks why a device cannot be opened: card on the PCI bus, driver bound, modules
+// loaded/installed for the running kernel, Secure Boot, /dev/dvb nodes, permissions
+// (Linux) or the BDA tuner list (Windows).
+TBSDVB_API std::vector<DiagnosticItem> diagnose(const DeviceSelection &sel);
+// Plain text report: one line per item, hints indented below
+TBSDVB_API std::string formatDiagnostics(const std::vector<DiagnosticItem> &items);
 
 // Linux: value of /sys/module/stid135/parameters/bbframe, or -1 if unavailable.
 TBSDVB_API int stid135BbFrameParameter();

@@ -81,6 +81,62 @@ std::unique_ptr<ITunerDevice> create(DeviceKind kind, std::string *error)
     return nullptr;
 }
 
+std::vector<DiagnosticItem> diagnose(const DeviceSelection &sel)
+{
+    using L = DiagnosticItem::Level;
+    switch (sel.kind) {
+    case DeviceKind::FileReplay: {
+        std::FILE *f = util::openFile(sel.replayFile, "rb");
+        if (f) {
+            std::fclose(f);
+            return {{L::Ok, "Replay file is readable: " + sel.replayFile, {}}};
+        }
+        return {{L::Error, "Replay file cannot be opened: " + sel.replayFile, "Check the path and permissions."}};
+    }
+    case DeviceKind::LinuxDvb:
+#if defined(TBSDVB_HAVE_LINUX_DVB)
+        return LinuxDvbDevice::diagnose(sel);
+#else
+        return {{L::Error, "This build has no Linux DVB support", "Linux DVB devices can only be used on Linux."}};
+#endif
+    case DeviceKind::WindowsBda: {
+#if defined(TBSDVB_HAVE_WIN_BDA)
+        std::vector<DiagnosticItem> out;
+        const auto tuners = WinBdaDevice::enumerate();
+        if (tuners.empty()) {
+            out.push_back({L::Error, "No BDA tuner found",
+                           "Install the TBS BDA driver for the card and check Device Manager (Sound, video and game "
+                           "controllers / Media) for the TBS tuners. Reboot after installing."});
+        }
+        for (const auto &t : tuners)
+            out.push_back({L::Ok, util::format("BDA tuner #%d: %s", t.index, t.name.c_str()), {}});
+        if (!tuners.empty() && sel.bdaDevicePath.empty() && (sel.bdaIndex < 0 || sel.bdaIndex >= static_cast<int>(tuners.size())))
+            out.push_back({L::Error, util::format("Selected BDA tuner #%d does not exist", sel.bdaIndex),
+                           "Pick one of the tuners listed above."});
+        return out;
+#else
+        return {{L::Error, "This build has no Windows BDA support", "BDA devices can only be used on Windows."}};
+#endif
+    }
+    }
+    return {};
+}
+
+std::string formatDiagnostics(const std::vector<DiagnosticItem> &items)
+{
+    std::string out;
+    for (const auto &i : items) {
+        const char *tag = i.level == DiagnosticItem::Level::Ok        ? "[ OK ] "
+            : i.level == DiagnosticItem::Level::Info                  ? "[INFO] "
+            : i.level == DiagnosticItem::Level::Warning               ? "[WARN] "
+                                                                      : "[FAIL] ";
+        out += tag + i.message + "\n";
+        if (!i.hint.empty())
+            out += "       -> " + i.hint + "\n";
+    }
+    return out;
+}
+
 int stid135BbFrameParameter()
 {
     std::FILE *f = std::fopen("/sys/module/stid135/parameters/bbframe", "r");
