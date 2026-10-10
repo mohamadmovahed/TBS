@@ -257,7 +257,7 @@ void MetricTile::paintEvent(QPaintEvent *)
         const QString text = QStringLiteral("%1 %2 · %3")
                                  .arg(m_history[m_hover], 0, 'f', m_decimals)
                                  .arg(m_sampleUnit)
-                                 .arg(ago == 0 ? tr("now") : tr("%1 s ago").arg(ago / 2.0, 0, 'f', ago % 2 ? 1 : 0));
+                                 .arg(ago == 0 ? tr("now") : tr("%1 s ago").arg(ago * m_sampleSeconds, 0, 'f', m_sampleSeconds < 1.0 ? 1 : 0));
         QFont tf = font();
         tf.setPixelSize(11);
         p.setFont(tf);

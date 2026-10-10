@@ -1,5 +1,6 @@
 #pragma once
 
+#include <tbsbbproc/Processor.h>
 #include <tbsdvb/Status.h>
 
 #include <QWidget>
@@ -19,6 +20,7 @@ public:
     void updateFrontend(const tbs::FrontendStatus &st);
     void updateStats(const tbs::StreamStats &st);
     void setBbFrameMode(bool on);
+    void updateContent(const tbs::bb::ProcessorSnapshot &snap);
     void reset();
 
 private:
@@ -42,6 +44,7 @@ private:
     QLabel *m_overflows = nullptr;
 
     QFrame *m_bbCard = nullptr;
+    QLabel *m_bbContent = nullptr;
     QLabel *m_bbFrames = nullptr;
     QLabel *m_bbRate = nullptr;
     QLabel *m_bbErrors = nullptr;

@@ -1,12 +1,13 @@
 # TBS Receiver
 
-Software for **TBS 6903x** (STiD135) DVB-S2/S2X receivers, in three parts:
+Software for **TBS 6903x** (STiD135) DVB-S2/S2X receivers, in four parts:
 
 | Part | What it is | Depends on |
 |------|------------|------------|
 | **`tbsdvb`** library (`libtbsdvb/`) | Tunes the card, reads status, captures TS or BBFrames, writes files, publishes over ZeroMQ. C++17 API plus a C API. | C++17 standard library; optionally libzmq. **No Qt.** |
+| **`tbsbbproc`** library (`libbbproc/`) | Processes BBFrames: detects TS or Generic Stream per ISI. Analyses PSI/SI tables of TS streams. Decapsulates GSE, extracts IP to pcap, keeps IP statistics. | `tbsdvb`; C++17 only. **No Qt, no hardware.** |
 | **`tbs-receiver`** (`app/`) | Desktop GUI built on the library. | Qt 6 (or 5.15); optionally FFmpeg for video. |
-| **`tbs-cli`** (`tools/`) | Headless command-line front end. | the library only |
+| **`tbs-cli`**, **`tbs-bbproc`** (`tools/`) | Headless capture front end, and offline capture-file analysis. | the libraries only |
 
 Supported backends:
 
@@ -199,6 +200,78 @@ The layouts of #21 and #10 match MediaPortal's open-source TBS support.
 > on a multistream carrier before relying on it. The BDA signal strength unit varies between drivers and is
 > shown as dBm or %, depending on the range.
 
+## BBFrame content processing (`tbsbbproc`)
+
+Each BBFrame is routed by its MATYPE to a pipeline for its input stream (ISI), so multistream carriers work:
+
+| MATYPE TS/GS | Detected content | Processing |
+|---|---|---|
+| `11` Transport | **Transport stream** | Rebuilds the TS packets, then analyses the PSI/SI tables |
+| `01` Generic continuous, `10` GSE-HEM | **GSE (IP)** if the data fields parse as GSE; otherwise *generic continuous (not GSE)* | GSE decapsulation, then IP statistics and pcap |
+| `00` Generic packetized | *Generic packetized* | Counted only |
+
+A plain TS capture (TS mode) goes through the same table analysis.
+
+**Transport streams:**
+- **Tables:** PAT, CAT, PMT, NIT actual/other, SDT actual/other, BAT, EIT present/following (schedule events are counted), and TDT/TOT. Every section is CRC-checked.
+- **Results:**
+  - services with provider, type, scrambling and now/next events;
+  - components (video/audio/subtitles/teletext, codec, language);
+  - ECM/EMM PIDs with the CA system;
+  - networks with satellite delivery parameters, including S2X ISI/PLS;
+  - bouquets, stream time, per-table versions and section/CRC counts;
+  - a description of what each PID carries.
+- **Text:** DVB text is converted to UTF-8 (ISO 8859-1/2/5/6/7/8/9/15, UTF-8, UCS-2; Persian/Arabic services use ISO 8859-6).
+
+**GSE** (ETSI TS 102 606-1):
+- **Modes:** normal mode, where each data field holds whole GSE packets, and GSE-HEM, where packets cross BBFrames and SYNCD gives the first packet start.
+- **Fragments:** reassembled by Frag ID with an MPEG-2 CRC-32 check and a timeout.
+- **Labels:** 6-byte, 3-byte, broadcast and re-use.
+- **Extension headers:** ULE extension headers, including bridged Ethernet frames.
+- **Output:** IPv4 and IPv6 PDUs feed the statistics:
+  - protocols;
+  - top flows (addresses, ports, packets, bytes, rate);
+  - labels and multicast;
+  - the GSE error counters.
+
+**pcap**: classic libpcap, readable by Wireshark and tcpdump. It comes in two flavours:
+- **Ethernet framing:** the 6-byte GSE label becomes the destination MAC, and bridged frames are written as received.
+- **Raw IP.**
+
+The file is flushed every second, so you can open it while the capture is running.
+
+```cpp
+#include <tbsbbproc/Processor.h>
+
+tbs::bb::ProcessorConfig pc;
+pc.pcap.enabled = true;
+pc.pcap.path = "gse.pcap";
+tbs::bb::Processor proc(pc);
+proc.open();
+// feed it from tbs::Receiver callbacks (or any BBFrame source) ...
+cb.onBbFrame = [&](const uint8_t *f, size_t n, const tbs::BbHeader &h) { proc.pushBbFrame(f, n, h); };
+// ... and poll from any thread
+tbs::bb::ProcessorSnapshot s = proc.snapshot();   // per-ISI: content, TsReport, GseStats, IpReport
+```
+
+**Offline analysis** of a recording works with plain TS, the card's pseudo-TS, raw BBFrames, or `0xB8`-prefixed
+BBFrames:
+```sh
+./build/tbs-bbproc capture.ts --pcap ip.pcap      # report + pcap; --verbose lists all flows and tables
+./build/tbs-cli --device linux:0:0 --freq 10971 --sr 29700 --pol h --bbframe --pcap ip.pcap   # live
+```
+
+**In the GUI:**
+- the **Services** tab shows the TS content;
+- the **IP / GSE** tab shows rates, protocols, labels, top flows, GSE health and the pcap status;
+- the Overview shows the detected content per ISI;
+- in TS mode, the PID table describes each PID.
+
+Turn on pcap extraction under **Outputs → Extract IP to pcap**.
+
+![Services tab](docs/screenshot-services.png)
+![IP / GSE tab](docs/screenshot-ip-gse.png)
+
 ## ZeroMQ message format
 
 One message per unit: *N* × 188-byte TS packets in TS mode (default *N* = 7), or one BBFrame.
@@ -220,6 +293,14 @@ ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=25 -t 20 -c:v libx264 -f mpegts v
 ```
 In the GUI, choose *File replay*, select `video_bb.ts` and *BBFrames*, and the preview shows the video.
 
+Generators for the content processing:
+```sh
+./build/tbs-make-test-stream --gse --out gse.ts                 # GSE IP traffic (UDP multicast, TCP, IPv6, ARP)
+./build/tbs-make-test-stream --gse --hem --dfl 3000 --out hem.ts
+./build/tbs-make-test-stream --add-si --in video.ts --out si.ts # adds NIT, EIT now/next, TDT, CAT, BAT
+./build/tbs-make-test-stream --mis --in video.ts --out mis.ts   # TS on ISI 1 + GSE on ISI 2
+```
+
 ## Command line
 
 ```
@@ -234,8 +315,9 @@ Run `tbs-cli --help` for all options: LNB, tone, DiSEqC, PLS, file formats, Zero
 ```
 libtbsdvb/include/tbsdvb/   public API (Receiver, Types, Status, Device, Sink, parsers, C API)
 libtbsdvb/src/              implementation; platform/ holds LinuxDvbDevice and WinBdaDevice
+libbbproc/                  tbsbbproc: content detection, PSI/SI, GSE, IP statistics, pcap, capture reader
 app/                        Qt GUI (theme, widgets, panels, video)
-tools/                      tbs-cli, tbs-make-test-stream, C API example, zmq_receiver.py
+tools/                      tbs-cli, tbs-bbproc, tbs-make-test-stream, C API example, zmq_receiver.py
 tests/                      unit tests and an end-to-end Receiver test
 cmake/                      find modules, MinGW toolchain
 ```

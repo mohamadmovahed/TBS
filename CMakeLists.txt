@@ -18,33 +18,42 @@ option(TBS_ENABLE_FFMPEG "Video preview in the GUI (needs FFmpeg)" ON)
 
 # ---- The library (no Qt) ----
 add_subdirectory(libtbsdvb)
+# ---- BBFrame / TS content processing (no Qt, no hardware) ----
+add_subdirectory(libbbproc)
 
 # ---- Command line tools ----
 if(TBS_BUILD_TOOLS)
     add_executable(tbs-cli tools/tbs_cli.cpp)
-    target_link_libraries(tbs-cli PRIVATE TbsDvb::tbsdvb)
+    target_link_libraries(tbs-cli PRIVATE TbsDvb::tbsdvb TbsDvb::tbsbbproc)
 
     add_executable(tbs-make-test-stream tools/make_test_stream.cpp tests/StreamBuilders.h)
     target_link_libraries(tbs-make-test-stream PRIVATE TbsDvb::tbsdvb)
+
+    add_executable(tbs-bbproc tools/bbproc_tool.cpp)
+    target_link_libraries(tbs-bbproc PRIVATE TbsDvb::tbsbbproc)
 
     add_executable(tbs-c-example tools/c_api_example.c)
     target_link_libraries(tbs-c-example PRIVATE TbsDvb::tbsdvb)
     set_target_properties(tbs-c-example PROPERTIES LINKER_LANGUAGE CXX)
 
-    install(TARGETS tbs-cli tbs-make-test-stream RUNTIME DESTINATION bin)
+    install(TARGETS tbs-cli tbs-make-test-stream tbs-bbproc RUNTIME DESTINATION bin)
 endif()
 
 # ---- Tests ----
 if(TBS_BUILD_TESTS)
     enable_testing()
     add_executable(tbs-tests tests/test_core.cpp tests/StreamBuilders.h)
-    target_link_libraries(tbs-tests PRIVATE TbsDvb::tbsdvb)
+    target_link_libraries(tbs-tests PRIVATE TbsDvb::tbsdvb TbsDvb::tbsbbproc)
     # White-box tests use the library's private headers; a shared build hides those symbols
     target_include_directories(tbs-tests PRIVATE libtbsdvb/src)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT TBSDVB_BUILD_SHARED)
         target_compile_definitions(tbs-tests PRIVATE TBS_TEST_LINUX_INTERNALS=1)
     endif()
     add_test(NAME tbsdvb-core COMMAND tbs-tests)
+
+    add_executable(tbs-bbproc-tests tests/test_bbproc.cpp tests/StreamBuilders.h)
+    target_link_libraries(tbs-bbproc-tests PRIVATE TbsDvb::tbsbbproc)
+    add_test(NAME tbsbbproc COMMAND tbs-bbproc-tests)
 endif()
 
 # ---- GUI ----

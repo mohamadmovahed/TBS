@@ -129,4 +129,29 @@ void save(QSettings &s, const tbs::ReceiverConfig &c)
     s.endGroup();
 }
 
+tbs::bb::ProcessorConfig loadProcessing(QSettings &s)
+{
+    const tbs::bb::ProcessorConfig d;
+    tbs::bb::ProcessorConfig c;
+    s.beginGroup(QStringLiteral("processing"));
+    c.pcap.enabled = read(s, "pcapEnabled", d.pcap.enabled);
+    c.pcap.path = readString(s, "pcapPath", d.pcap.path);
+    c.pcap.timestampSuffix = read(s, "pcapTimestampSuffix", d.pcap.timestampSuffix);
+    c.pcap.ethernetFraming = read(s, "pcapEthernet", d.pcap.ethernetFraming);
+    c.pcap.ipOnly = read(s, "pcapIpOnly", d.pcap.ipOnly);
+    s.endGroup();
+    return c;
+}
+
+void saveProcessing(QSettings &s, const tbs::bb::ProcessorConfig &c)
+{
+    s.beginGroup(QStringLiteral("processing"));
+    s.setValue(QStringLiteral("pcapEnabled"), c.pcap.enabled);
+    writeString(s, "pcapPath", c.pcap.path);
+    s.setValue(QStringLiteral("pcapTimestampSuffix"), c.pcap.timestampSuffix);
+    s.setValue(QStringLiteral("pcapEthernet"), c.pcap.ethernetFraming);
+    s.setValue(QStringLiteral("pcapIpOnly"), c.pcap.ipOnly);
+    s.endGroup();
+}
+
 } // namespace SettingsStore

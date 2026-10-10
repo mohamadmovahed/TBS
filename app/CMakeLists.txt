@@ -14,6 +14,9 @@ add_executable(tbs-receiver
     panels/OutputPanel.cpp panels/OutputPanel.h
     panels/OverviewPanel.cpp panels/OverviewPanel.h
     panels/PidTable.cpp panels/PidTable.h
+    panels/ServicesPanel.cpp panels/ServicesPanel.h
+    panels/IpPanel.cpp panels/IpPanel.h
+    widgets/ShareBarDelegate.cpp widgets/ShareBarDelegate.h
     widgets/MetricTile.cpp widgets/MetricTile.h
     widgets/StatusPill.cpp widgets/StatusPill.h
     widgets/LockChain.cpp widgets/LockChain.h
@@ -21,7 +24,7 @@ add_executable(tbs-receiver
     video/VideoWidget.cpp video/VideoWidget.h
 )
 target_include_directories(tbs-receiver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(tbs-receiver PRIVATE TbsDvb::tbsdvb
+target_link_libraries(tbs-receiver PRIVATE TbsDvb::tbsdvb TbsDvb::tbsbbproc
     Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Widgets)
 target_compile_definitions(tbs-receiver PRIVATE TBS_APP_VERSION="${PROJECT_VERSION}")
 

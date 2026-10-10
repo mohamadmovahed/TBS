@@ -34,6 +34,13 @@ bool ReceiverController::start(const tbs::ReceiverConfig &cfg)
     cb.onStats = [this](const tbs::StreamStats &s) { emit statsUpdated(s); };
     if (m_previewSink)
         cb.onPreviewTs = m_previewSink;
+    if (auto proc = m_processor) {
+        // Runs on the receiver thread; the processor is internally locked
+        if (cfg.capture == tbs::CaptureMode::BBFrame)
+            cb.onBbFrame = [proc](const uint8_t *f, size_t n, const tbs::BbHeader &h) { proc->pushBbFrame(f, n, h); };
+        else
+            cb.onTsPackets = [proc](const uint8_t *p, size_t n) { proc->pushTs(p, n); };
+    }
     m_rx.setCallbacks(cb);
     return m_rx.start(cfg);
 }

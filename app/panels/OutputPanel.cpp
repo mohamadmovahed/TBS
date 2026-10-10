@@ -108,6 +108,40 @@ OutputPanel::OutputPanel(QWidget *parent)
         root->addWidget(hintLabel(tr("This build has no ZeroMQ support.")));
     }
 
+    // ---- GSE -> pcap ----
+    m_pcapOn = new ToggleSwitch;
+    root->addLayout(sectionHeader(tr("Extract IP to pcap"), m_pcapOn));
+    m_pcapBox = new QWidget;
+    auto *pc = makeForm();
+    m_pcapBox->setLayout(pc);
+    auto *prow = new QHBoxLayout;
+    m_pcapPath = new QLineEdit;
+    m_pcapPath->setPlaceholderText(tr("~/gse.pcap"));
+    auto *pbrowse = new QPushButton;
+    pbrowse->setObjectName(QStringLiteral("Ghost"));
+    pbrowse->setIcon(Theme::icon(QStringLiteral("folder"), Theme::tokens().ink2));
+    prow->addWidget(m_pcapPath, 1);
+    prow->addWidget(pbrowse);
+    pc->addRow(keyLabel(tr("File")), prow);
+    m_pcapFraming = new QComboBox;
+    m_pcapFraming->addItem(tr("Ethernet (GSE label as MAC)"), true);
+    m_pcapFraming->addItem(tr("Raw IP"), false);
+    pc->addRow(keyLabel(tr("Framing")), m_pcapFraming);
+    m_pcapNonIp = new QCheckBox(tr("Include non-IP PDUs (ARP, ...)"));
+    pc->addRow(QString(), m_pcapNonIp);
+    m_pcapTimestamp = new QCheckBox(tr("Append date and time"));
+    pc->addRow(QString(), m_pcapTimestamp);
+    root->addWidget(m_pcapBox);
+    root->addWidget(hintLabel(tr("BBFrame capture of a GSE stream: IP packets are written for Wireshark/tcpdump. "
+                                 "Transport streams are analysed (Services tab) regardless of this setting.")));
+    connect(pbrowse, &QPushButton::clicked, this, [this]() {
+        const QString f = QFileDialog::getSaveFileName(this, tr("pcap file"), m_pcapPath->text(), tr("pcap (*.pcap);;All files (*)"));
+        if (!f.isEmpty())
+            m_pcapPath->setText(f);
+    });
+    connect(m_pcapOn, &ToggleSwitch::toggled, this, &OutputPanel::updateEnabled);
+    connect(m_pcapFraming, qOverload<int>(&QComboBox::currentIndexChanged), this, &OutputPanel::updateEnabled);
+
     // ---- Preview ----
     m_video = new ToggleSwitch;
     root->addLayout(sectionHeader(tr("Video preview"), m_video));
@@ -173,9 +207,31 @@ bool OutputPanel::videoPreview() const
 #endif
 }
 
+void OutputPanel::setProcessing(const tbs::bb::ProcessorConfig &cfg)
+{
+    m_pcapOn->setChecked(cfg.pcap.enabled);
+    m_pcapPath->setText(QString::fromStdString(cfg.pcap.path));
+    m_pcapFraming->setCurrentIndex(m_pcapFraming->findData(cfg.pcap.ethernetFraming));
+    m_pcapNonIp->setChecked(!cfg.pcap.ipOnly);
+    m_pcapTimestamp->setChecked(cfg.pcap.timestampSuffix);
+    updateEnabled();
+}
+
+tbs::bb::ProcessorConfig OutputPanel::processing() const
+{
+    tbs::bb::ProcessorConfig cfg;
+    cfg.pcap.enabled = m_pcapOn->isChecked();
+    cfg.pcap.path = m_pcapPath->text().trimmed().toStdString();
+    cfg.pcap.ethernetFraming = m_pcapFraming->currentData().toBool();
+    cfg.pcap.ipOnly = !m_pcapNonIp->isChecked();
+    cfg.pcap.timestampSuffix = m_pcapTimestamp->isChecked();
+    return cfg;
+}
+
 void OutputPanel::setEditable(bool editable)
 {
     m_editable = editable;
+    m_pcapOn->setEnabled(editable);
     m_fileOn->setEnabled(editable);
     m_zmqOn->setEnabled(editable && ZmqSink::available());
     updateEnabled();
@@ -195,4 +251,6 @@ void OutputPanel::updateEnabled()
     m_fileBox->setEnabled(m_editable && m_fileOn->isChecked());
     m_zmqBox->setEnabled(m_editable && m_zmqOn->isChecked());
     m_packetsPerMsg->setEnabled(m_mode == CaptureMode::TransportStream);
+    m_pcapBox->setEnabled(m_editable && m_pcapOn->isChecked());
+    m_pcapNonIp->setEnabled(m_pcapFraming->currentData().toBool());
 }

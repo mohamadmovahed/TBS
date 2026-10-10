@@ -4,7 +4,10 @@
 
 #include <QMainWindow>
 
+class IpPanel;
 class LockChain;
+class QTimer;
+class ServicesPanel;
 class MetricTile;
 class OutputPanel;
 class OverviewPanel;
@@ -32,6 +35,8 @@ public slots:
     void stopCapture();
     void toggleCapture();
     void applyTuning();
+    // Selects a details tab by name: overview, services, ip, pids, log
+    void showTab(const QString &name);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -44,6 +49,7 @@ private slots:
     void toggleTheme();
     void setPreview(bool on);
     void runDiagnostics();
+    void refreshProcessing();
 
 private:
     QWidget *buildHeader();
@@ -90,5 +96,10 @@ private:
     PidTable *m_pids = nullptr;
     QPlainTextEdit *m_log = nullptr;
     class QTabWidget *m_tabs = nullptr;
+    QWidget *m_logTab = nullptr;
+    ServicesPanel *m_services = nullptr;
+    IpPanel *m_ip = nullptr;
+    std::shared_ptr<tbs::bb::Processor> m_processor;
+    QTimer *m_procTimer = nullptr;
     QLabel *m_statusText = nullptr;
 };

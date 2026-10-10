@@ -57,6 +57,8 @@ OverviewPanel::OverviewPanel(QWidget *parent)
     m_overflows = addRow(g, tr("Driver overflows"));
 
     m_bbCard = makeCard(tr("Baseband frames"), g);
+    m_bbContent = addRow(g, tr("Content"));
+    m_bbContent->setWordWrap(true);
     m_bbFrames = addRow(g, tr("Frames"));
     m_bbRate = addRow(g, tr("Rate"));
     m_bbErrors = addRow(g, tr("CRC / seq / length"));
@@ -118,6 +120,19 @@ void OverviewPanel::reset()
 {
     for (QLabel *l : findChildren<QLabel *>(QStringLiteral("ValueLabel")))
         l->setText(QStringLiteral("–"));
+}
+
+void OverviewPanel::updateContent(const tbs::bb::ProcessorSnapshot &snap)
+{
+    QStringList parts;
+    for (const auto &s : snap.streams) {
+        if (s.content == tbs::bb::StreamContent::TsInput)
+            continue;
+        const QString what = QString::fromLatin1(tbs::bb::streamContentName(s.content));
+        parts << (s.isi < 0 ? QStringLiteral("<b>%1</b>").arg(what) : QStringLiteral("ISI %1: <b>%2</b>").arg(s.isi).arg(what));
+    }
+    if (!parts.isEmpty())
+        m_bbContent->setText(parts.join(QStringLiteral("<br>")));
 }
 
 void OverviewPanel::updateFrontend(const FrontendStatus &st)

@@ -1,17 +1,14 @@
 #include "PidTable.h"
 
 #include "../Theme.h"
+#include "../widgets/ShareBarDelegate.h"
 
 #include <tbsdvb/BbFrameExtractor.h>
 
 #include <QHeaderView>
 #include <QLocale>
-#include <QPainter>
-#include <QStyledItemDelegate>
 
 namespace {
-
-constexpr int kShareRole = Qt::UserRole + 1;
 
 QString describe(uint16_t pid)
 {
@@ -37,34 +34,6 @@ QString describe(uint16_t pid)
     }
 }
 
-// Meter: track in the hairline colour, fill in the accent, value as text
-class ShareDelegate : public QStyledItemDelegate
-{
-public:
-    using QStyledItemDelegate::QStyledItemDelegate;
-    void paint(QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &index) const override
-    {
-        const Theme::Tokens &t = Theme::tokens();
-        const double share = index.data(kShareRole).toDouble();
-        p->save();
-        p->setRenderHint(QPainter::Antialiasing);
-        const QRect r = opt.rect.adjusted(8, 0, -8, 0);
-        const int textW = 64;
-        const QRectF track(r.left(), r.center().y() - 3, r.width() - textW, 6);
-        p->setPen(Qt::NoPen);
-        p->setBrush(t.hairline);
-        p->drawRoundedRect(track, 3, 3);
-        QRectF fill = track;
-        fill.setWidth(std::max(share > 0 ? 3.0 : 0.0, track.width() * share));
-        p->setBrush(t.accent);
-        p->drawRoundedRect(fill, 3, 3);
-        p->setPen(t.ink2);
-        p->drawText(QRect(r.right() - textW + 8, r.top(), textW - 8, r.height()), Qt::AlignVCenter | Qt::AlignRight,
-                    QStringLiteral("%1 %").arg(share * 100.0, 0, 'f', share < 0.1 ? 2 : 1));
-        p->restore();
-    }
-};
-
 } // namespace
 
 PidTable::PidTable(QWidget *parent)
@@ -83,12 +52,18 @@ PidTable::PidTable(QWidget *parent)
     setEditTriggers(QAbstractItemView::NoEditTriggers);
     setSelectionMode(QAbstractItemView::NoSelection);
     setFocusPolicy(Qt::NoFocus);
-    setItemDelegateForColumn(2, new ShareDelegate(this));
+    setItemDelegateForColumn(2, new ShareBarDelegate(this));
 }
 
 void PidTable::reset()
 {
     setRowCount(0);
+    m_usage.clear();
+}
+
+void PidTable::setPidUsage(const std::map<uint16_t, std::string> &usage)
+{
+    m_usage = usage;
 }
 
 void PidTable::updateStats(const tbs::StreamStats &st)
@@ -110,8 +85,9 @@ void PidTable::updateStats(const tbs::StreamStats &st)
         cell(0)->setText(QStringLiteral("0x%1  ·  %2").arg(p.first, 4, 16, QLatin1Char('0')).arg(p.first));
         cell(1)->setText(QLocale().toString(static_cast<qulonglong>(p.second)));
         cell(1)->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        cell(2)->setData(kShareRole, total ? static_cast<double>(p.second) / static_cast<double>(total) : 0.0);
-        cell(3)->setText(describe(p.first));
+        cell(2)->setData(ShareBarDelegate::kShareRole, total ? static_cast<double>(p.second) / static_cast<double>(total) : 0.0);
+        const auto u = m_usage.find(p.first);
+        cell(3)->setText(u != m_usage.end() ? QString::fromStdString(u->second) : describe(p.first));
         ++row;
     }
     viewport()->update();

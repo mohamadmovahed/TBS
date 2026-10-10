@@ -24,6 +24,8 @@ public:
     void setSparklineVisible(bool on);
     void setValueFormat(int decimals, const QString &unit);
     void clearHistory();
+    // Time between samples, for the hover read-out ("12 s ago")
+    void setSampleSeconds(double s) { m_sampleSeconds = s; }
 
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
@@ -48,4 +50,5 @@ private:
     int m_decimals = 1;
     QString m_sampleUnit;
     int m_hover = -1;
+    double m_sampleSeconds = 0.5;
 };

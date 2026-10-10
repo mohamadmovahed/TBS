@@ -1,5 +1,6 @@
 #pragma once
 
+#include <tbsbbproc/Processor.h>
 #include <tbsdvb/Types.h>
 
 #include <QWidget>
@@ -21,6 +22,8 @@ public:
     void setConfig(const tbs::ReceiverConfig &cfg, bool videoPreview);
     void applyTo(tbs::ReceiverConfig &cfg) const;
     bool videoPreview() const;
+    void setProcessing(const tbs::bb::ProcessorConfig &cfg);
+    tbs::bb::ProcessorConfig processing() const;
     void setEditable(bool editable);
     void setCaptureMode(tbs::CaptureMode mode);
 
@@ -51,4 +54,11 @@ private:
     QSpinBox *m_hwm = nullptr;
 
     ToggleSwitch *m_video = nullptr;
+
+    ToggleSwitch *m_pcapOn = nullptr;
+    QWidget *m_pcapBox = nullptr;
+    QLineEdit *m_pcapPath = nullptr;
+    QComboBox *m_pcapFraming = nullptr;
+    QCheckBox *m_pcapNonIp = nullptr;
+    QCheckBox *m_pcapTimestamp = nullptr;
 };

@@ -106,4 +106,249 @@ inline std::vector<Bytes> bbFrameToPseudoTs(const Bytes &frame, uint8_t &cc, uin
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// GSE / IP builders
+// ---------------------------------------------------------------------------
+
+inline uint32_t crc32Mpeg(const uint8_t *p, size_t n)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; ++i) {
+        crc ^= static_cast<uint32_t>(p[i]) << 24;
+        for (int b = 0; b < 8; ++b)
+            crc = (crc & 0x80000000u) ? (crc << 1) ^ 0x04C11DB7u : (crc << 1);
+    }
+    return crc;
+}
+
+inline void put16(Bytes &b, uint16_t v)
+{
+    b.push_back(static_cast<uint8_t>(v >> 8));
+    b.push_back(static_cast<uint8_t>(v));
+}
+
+inline Bytes makeIpv4(uint8_t proto, const uint8_t src[4], const uint8_t dst[4], uint16_t sport, uint16_t dport,
+                      size_t payload, uint8_t seed)
+{
+    const size_t l4 = proto == 6 ? 20 : 8;
+    const size_t total = 20 + l4 + payload;
+    Bytes p;
+    p.push_back(0x45);
+    p.push_back(0);
+    put16(p, static_cast<uint16_t>(total));
+    put16(p, seed); // identification
+    put16(p, 0x4000); // DF
+    p.push_back(64);
+    p.push_back(proto);
+    put16(p, 0); // checksum, filled below
+    p.insert(p.end(), src, src + 4);
+    p.insert(p.end(), dst, dst + 4);
+    uint32_t sum = 0;
+    for (size_t i = 0; i < 20; i += 2)
+        sum += (p[i] << 8) | p[i + 1];
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    p[10] = static_cast<uint8_t>(~sum >> 8);
+    p[11] = static_cast<uint8_t>(~sum);
+    put16(p, sport);
+    put16(p, dport);
+    if (proto == 6) {
+        for (int i = 0; i < 8; ++i)
+            p.push_back(0);
+        p.push_back(0x50);
+        p.push_back(0x18);
+        put16(p, 0xFFFF);
+        put16(p, 0);
+        put16(p, 0);
+    } else {
+        put16(p, static_cast<uint16_t>(8 + payload));
+        put16(p, 0);
+    }
+    for (size_t i = 0; i < payload; ++i)
+        p.push_back(static_cast<uint8_t>(seed + i));
+    return p;
+}
+
+inline Bytes makeIpv6Udp(const uint8_t src[16], const uint8_t dst[16], uint16_t sport, uint16_t dport, size_t payload)
+{
+    Bytes p = {0x60, 0, 0, 0};
+    put16(p, static_cast<uint16_t>(8 + payload));
+    p.push_back(17);
+    p.push_back(64);
+    p.insert(p.end(), src, src + 16);
+    p.insert(p.end(), dst, dst + 16);
+    put16(p, sport);
+    put16(p, dport);
+    put16(p, static_cast<uint16_t>(8 + payload));
+    put16(p, 0);
+    for (size_t i = 0; i < payload; ++i)
+        p.push_back(static_cast<uint8_t>(i));
+    return p;
+}
+
+// GSE packets (TS 102 606) for one PDU. If the encapsulated PDU exceeds maxPacket
+// bytes it is fragmented (first / middle / last fragment with CRC-32).
+inline std::vector<Bytes> gseEncapsulate(const Bytes &pdu, uint16_t protocolType, uint8_t labelType, const uint8_t *label,
+                                         size_t maxPacket, uint8_t fragId)
+{
+    const size_t lb = labelType == 0 ? 6 : labelType == 1 ? 3 : 0;
+    Bytes body; // Protocol_Type, Label, PDU
+    put16(body, protocolType);
+    if (lb)
+        body.insert(body.end(), label, label + lb);
+    body.insert(body.end(), pdu.begin(), pdu.end());
+
+    auto header = [](bool s, bool e, uint8_t lt, size_t len) {
+        Bytes h(2);
+        h[0] = static_cast<uint8_t>((s ? 0x80 : 0) | (e ? 0x40 : 0) | ((lt & 3) << 4) | ((len >> 8) & 0x0F));
+        h[1] = static_cast<uint8_t>(len);
+        return h;
+    };
+    std::vector<Bytes> out;
+    if (2 + body.size() <= maxPacket) {
+        Bytes g = header(true, true, labelType, body.size());
+        g.insert(g.end(), body.begin(), body.end());
+        out.push_back(g);
+        return out;
+    }
+    // Fragmented: CRC over Total_Length + body
+    Bytes crcInput;
+    put16(crcInput, static_cast<uint16_t>(body.size()));
+    crcInput.insert(crcInput.end(), body.begin(), body.end());
+    const uint32_t crc = crc32Mpeg(crcInput.data(), crcInput.size());
+    Bytes tail = body;
+    tail.push_back(static_cast<uint8_t>(crc >> 24));
+    tail.push_back(static_cast<uint8_t>(crc >> 16));
+    tail.push_back(static_cast<uint8_t>(crc >> 8));
+    tail.push_back(static_cast<uint8_t>(crc));
+
+    size_t pos = 0;
+    bool first = true;
+    while (pos < tail.size()) {
+        const size_t overhead = 2 + 1 + (first ? 2 : 0);
+        size_t take = std::min(maxPacket - overhead, tail.size() - pos);
+        const bool last = pos + take == tail.size();
+        // The CRC must not be split from the end of the last fragment
+        if (!last && tail.size() - (pos + take) < 4)
+            take = tail.size() - pos - 4;
+        // LT is only meaningful in the first fragment; later ones use 11 because
+        // S=0, E=0, LT=00 would read as padding
+        Bytes g = header(first, last, first ? labelType : 3, overhead - 2 + take);
+        g.push_back(fragId);
+        if (first)
+            put16(g, static_cast<uint16_t>(body.size()));
+        g.insert(g.end(), tail.begin() + static_cast<std::ptrdiff_t>(pos), tail.begin() + static_cast<std::ptrdiff_t>(pos + take));
+        out.push_back(g);
+        pos += take;
+        first = false;
+    }
+    return out;
+}
+
+// Packs GSE packets into BBFrames.
+//   normal mode (TS/GS = 01): whole packets per data field, zero padding at the end
+//   HEM (TS/GS = 10): packets run across data fields, SYNCD = first packet start
+inline std::vector<Bytes> gseToBbFrames(const std::vector<Bytes> &packets, size_t dataFieldBytes, bool hem, int isi = -1)
+{
+    std::vector<Bytes> frames;
+    const uint8_t sis = isi < 0 ? 0x20 : 0x00;
+    const uint8_t matype1 = static_cast<uint8_t>((hem ? 0x80 : 0x40) | sis | 0x10);
+    const uint8_t matype2 = static_cast<uint8_t>(isi < 0 ? 0 : isi);
+    if (!hem) {
+        Bytes df;
+        for (const Bytes &g : packets) {
+            if (df.size() + g.size() > dataFieldBytes) {
+                df.resize(dataFieldBytes, 0);
+                frames.push_back(makeBbFrame(matype1, matype2, 0, df, 0, 0, false));
+                df.clear();
+            }
+            df.insert(df.end(), g.begin(), g.end());
+        }
+        if (!df.empty()) {
+            df.resize(dataFieldBytes, 0);
+            frames.push_back(makeBbFrame(matype1, matype2, 0, df, 0, 0, false));
+        }
+        return frames;
+    }
+    Bytes stream;
+    std::vector<size_t> starts;
+    for (const Bytes &g : packets) {
+        starts.push_back(stream.size());
+        stream.insert(stream.end(), g.begin(), g.end());
+    }
+    size_t si = 0;
+    for (size_t off = 0; off < stream.size(); off += dataFieldBytes) {
+        const size_t end = std::min(stream.size(), off + dataFieldBytes);
+        Bytes df(stream.begin() + static_cast<std::ptrdiff_t>(off), stream.begin() + static_cast<std::ptrdiff_t>(end));
+        while (si < starts.size() && starts[si] < off)
+            ++si;
+        uint16_t syncd = 0xFFFF;
+        if (si < starts.size() && starts[si] < end)
+            syncd = static_cast<uint16_t>((starts[si] - off) * 8);
+        df.resize(dataFieldBytes, 0);
+        frames.push_back(makeBbFrame(matype1, matype2, 0, df, syncd, 0, true));
+    }
+    return frames;
+}
+
+// ---------------------------------------------------------------------------
+// PSI / SI section builders
+// ---------------------------------------------------------------------------
+
+// Long-form section: table_id, length, ext, version, section numbers, body, CRC
+inline Bytes makeSection(uint8_t tableId, uint16_t ext, uint8_t version, const Bytes &body, uint8_t sectionNumber = 0,
+                         uint8_t lastSection = 0)
+{
+    Bytes s;
+    s.push_back(tableId);
+    const size_t len = 5 + body.size() + 4;
+    s.push_back(static_cast<uint8_t>(0xB0 | ((len >> 8) & 0x0F)));
+    s.push_back(static_cast<uint8_t>(len));
+    put16(s, ext);
+    s.push_back(static_cast<uint8_t>(0xC1 | ((version & 0x1F) << 1)));
+    s.push_back(sectionNumber);
+    s.push_back(lastSection);
+    s.insert(s.end(), body.begin(), body.end());
+    const uint32_t crc = crc32Mpeg(s.data(), s.size());
+    for (int i = 3; i >= 0; --i)
+        s.push_back(static_cast<uint8_t>(crc >> (8 * i)));
+    return s;
+}
+
+// Splits a section into TS packets (PUSI + pointer field, 0xFF stuffing)
+inline std::vector<Bytes> sectionToTs(const Bytes &section, uint16_t pid, uint8_t &cc)
+{
+    std::vector<Bytes> out;
+    size_t pos = 0;
+    bool first = true;
+    while (pos < section.size()) {
+        Bytes p(188, 0xFF);
+        p[0] = 0x47;
+        p[1] = static_cast<uint8_t>((first ? 0x40 : 0) | ((pid >> 8) & 0x1F));
+        p[2] = static_cast<uint8_t>(pid);
+        p[3] = static_cast<uint8_t>(0x10 | (cc++ & 0x0F));
+        size_t off = 4;
+        if (first)
+            p[off++] = 0; // pointer field
+        const size_t take = std::min(188 - off, section.size() - pos);
+        std::memcpy(p.data() + off, section.data() + pos, take);
+        pos += take;
+        first = false;
+        out.push_back(p);
+    }
+    return out;
+}
+
+inline Bytes dvbString(const std::string &s)
+{
+    return Bytes(s.begin(), s.end());
+}
+
+inline void addDescriptor(Bytes &b, uint8_t tag, const Bytes &data)
+{
+    b.push_back(tag);
+    b.push_back(static_cast<uint8_t>(data.size()));
+    b.insert(b.end(), data.begin(), data.end());
+}
+
 } // namespace builders

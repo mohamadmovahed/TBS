@@ -1,6 +1,7 @@
 #pragma once
 
 #include <tbsdvb/Receiver.h>
+#include <tbsbbproc/Processor.h>
 
 #include <QMetaType>
 #include <QObject>
@@ -22,6 +23,8 @@ public:
     // Called on the receiver thread with decodable TS while preview is enabled
     void setPreviewSink(std::function<void(const uint8_t *, size_t)> sink);
     void setPreviewEnabled(bool on);
+    // Content processing (tables, GSE, pcap) for the next start(); nullptr disables it
+    void setProcessor(std::shared_ptr<tbs::bb::Processor> processor) { m_processor = std::move(processor); }
 
     bool start(const tbs::ReceiverConfig &cfg);
     void stop();
@@ -39,4 +42,5 @@ signals:
 private:
     tbs::Receiver m_rx;
     std::function<void(const uint8_t *, size_t)> m_previewSink;
+    std::shared_ptr<tbs::bb::Processor> m_processor;
 };

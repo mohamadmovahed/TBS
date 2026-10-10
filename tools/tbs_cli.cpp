@@ -5,6 +5,7 @@
 //   tbs-cli --device bda:0 --freq 10971 --sr 29700 --pol h --bbframe --zmq tcp://*:5555
 //   tbs-cli --device replay:video_bb.ts --rate 5 --bbframe --out frames.bbf --duration 10
 
+#include "tbsbbproc/Processor.h"
 #include "tbsdvb/tbsdvb.h"
 
 #include <atomic>
@@ -45,6 +46,8 @@ void usage(const char *argv0)
         "  --bbframe                   capture BBFrames instead of TS\n"
         "  --out FILE [--bb-format raw|b8|pseudo] [--timestamp]\n"
         "  --zmq ENDPOINT [--push] [--connect] [--topic T] [--header] [--packets N]\n"
+        "  --analyze                   analyse the content (TS tables, GSE/IP) and print a report at the end\n"
+        "  --pcap FILE [--pcap-raw]    extract IP packets carried in GSE to a pcap file (BBFrame mode)\n"
         "  --duration SEC              stop after SEC seconds (default: until Ctrl+C)\n"
         "  --quiet                     no periodic status line\n",
         argv0);
@@ -103,6 +106,8 @@ int main(int argc, char **argv)
     double duration = 0;
     bool quiet = false;
     bool diagnoseOnly = false;
+    bool analyze = false;
+    tbs::bb::ProcessorConfig procCfg;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -189,6 +194,15 @@ int main(int argc, char **argv)
             cfg.zmq.metadataHeader = true;
         } else if (a == "--packets") {
             cfg.zmq.tsPacketsPerMessage = std::stoi(next());
+        } else if (a == "--analyze") {
+            analyze = true;
+        } else if (a == "--pcap") {
+            analyze = true;
+            procCfg.pcap.enabled = true;
+            procCfg.pcap.path = next();
+            procCfg.pcap.timestampSuffix = false;
+        } else if (a == "--pcap-raw") {
+            procCfg.pcap.ethernetFraming = false;
         } else if (a == "--duration") {
             duration = std::stod(next());
         } else if (a == "--quiet") {
@@ -233,6 +247,19 @@ int main(int argc, char **argv)
                      static_cast<unsigned long long>(s.tsPackets), static_cast<unsigned long long>(s.ccErrors),
                      static_cast<unsigned long long>(s.bbFrames), static_cast<unsigned long long>(s.bbCrcErrors));
     };
+    std::shared_ptr<tbs::bb::Processor> proc;
+    if (analyze) {
+        proc = std::make_shared<tbs::bb::Processor>(procCfg);
+        std::string perr;
+        if (!proc->open(&perr)) {
+            std::fprintf(stderr, "error: %s\n", perr.c_str());
+            return 1;
+        }
+        if (cfg.capture == tbs::CaptureMode::BBFrame)
+            cb.onBbFrame = [proc](const uint8_t *f, size_t n, const tbs::BbHeader &h) { proc->pushBbFrame(f, n, h); };
+        else
+            cb.onTsPackets = [proc](const uint8_t *p, size_t n) { proc->pushTs(p, n); };
+    }
     rx.setCallbacks(cb);
     rx.setStatusInterval(1000);
 
@@ -246,6 +273,10 @@ int main(int argc, char **argv)
     }
     rx.stop();
     std::fprintf(stderr, "\n");
+    if (proc) {
+        proc->close();
+        std::printf("%s", tbs::bb::formatReport(proc->snapshot()).c_str());
+    }
     const std::string err = rx.lastError();
     if (!err.empty()) {
         std::fprintf(stderr, "error: %s\n", err.c_str());

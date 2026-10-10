@@ -19,7 +19,10 @@ int main(int argc, char *argv[])
     parser.addVersionOption();
     const QCommandLineOption autostart(QStringLiteral("autostart"), QStringLiteral("Start capturing with the last used settings"));
     const QCommandLineOption theme(QStringLiteral("theme"), QStringLiteral("dark or light"), QStringLiteral("theme"));
+    const QCommandLineOption tab(QStringLiteral("tab"), QStringLiteral("Initial details tab: overview, services, ip, pids, log"),
+                                 QStringLiteral("name"));
     parser.addOption(autostart);
+    parser.addOption(tab);
     parser.addOption(theme);
     parser.process(app);
 
@@ -31,6 +34,8 @@ int main(int argc, char *argv[])
     MainWindow w;
     w.resize(1480, 940);
     w.show();
+    if (parser.isSet(tab))
+        w.showTab(parser.value(tab));
     if (parser.isSet(autostart))
         QTimer::singleShot(0, &w, &MainWindow::startCapture);
     return app.exec();

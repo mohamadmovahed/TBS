@@ -2,9 +2,11 @@
 
 #include "SettingsStore.h"
 #include "Theme.h"
+#include "panels/IpPanel.h"
 #include "panels/OutputPanel.h"
 #include "panels/OverviewPanel.h"
 #include "panels/PidTable.h"
+#include "panels/ServicesPanel.h"
 #include "panels/TuningPanel.h"
 #include "video/VideoWidget.h"
 #include "widgets/LockChain.h"
@@ -32,6 +34,7 @@
 #include <QStyle>
 #include <QTabWidget>
 #include <QTime>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <cmath>
@@ -114,6 +117,10 @@ MainWindow::MainWindow(QWidget *parent)
         m_video->setMessage(info);
     }, Qt::QueuedConnection);
 #endif
+
+    m_procTimer = new QTimer(this);
+    m_procTimer->setInterval(1000);
+    connect(m_procTimer, &QTimer::timeout, this, &MainWindow::refreshProcessing);
 
     auto *f5 = new QShortcut(QKeySequence(Qt::Key_F5), this);
     connect(f5, &QShortcut::activated, this, &MainWindow::toggleCapture);
@@ -313,15 +320,20 @@ QWidget *MainWindow::buildMain()
         ol->addWidget(card);
         return outer;
     };
+    m_services = new ServicesPanel;
+    m_ip = new IpPanel;
     tabs->addTab(scrollWrap(m_overview), tr("Overview"));
+    tabs->addTab(m_services, tr("Services"));
+    tabs->addTab(scrollWrap(m_ip), tr("IP / GSE"));
     tabs->addTab(wrapCard(m_pids), tr("PIDs"));
-    tabs->addTab(wrapCard(m_log), tr("Log"));
+    m_logTab = wrapCard(m_log);
+    tabs->addTab(m_logTab, tr("Log"));
 
     auto *split = new QSplitter(Qt::Vertical);
     split->addWidget(top);
     split->addWidget(tabs);
-    split->setStretchFactor(0, 3);
-    split->setStretchFactor(1, 2);
+    split->setStretchFactor(0, 1);
+    split->setStretchFactor(1, 1);
     split->setChildrenCollapsible(false);
     v->addWidget(split, 1);
     return main;
@@ -338,6 +350,7 @@ void MainWindow::loadSettings()
     const bool preview = s.value(QStringLiteral("ui/videoPreview"), true).toBool();
     m_tuning->setConfig(m_config);
     m_output->setConfig(m_config, preview);
+    m_output->setProcessing(SettingsStore::loadProcessing(s));
     m_overview->setBbFrameMode(m_config.capture == tbs::CaptureMode::BBFrame);
     restoreGeometry(s.value(QStringLiteral("window/geometry")).toByteArray());
     m_tuningDirty = false;
@@ -347,6 +360,7 @@ void MainWindow::saveSettings()
 {
     QSettings s;
     SettingsStore::save(s, currentConfig());
+    SettingsStore::saveProcessing(s, m_output->processing());
     s.setValue(QStringLiteral("ui/videoPreview"), m_output->videoPreview());
     s.setValue(QStringLiteral("ui/theme"), Theme::mode() == Theme::Mode::Light ? QStringLiteral("light") : QStringLiteral("dark"));
     s.setValue(QStringLiteral("window/geometry"), saveGeometry());
@@ -391,6 +405,22 @@ void MainWindow::startCapture()
     m_pill->setState(StatusPill::Kind::Accent, tr("STARTING"));
     m_subtitle->setText(deviceText(m_config.device));
     m_statusText->setText(QString::fromStdString(m_config.tuning.describe()));
+
+    // Content processing: TS tables, GSE decapsulation, IP statistics, pcap
+    tbs::bb::ProcessorConfig pc = m_output->processing();
+    if (m_config.capture != tbs::CaptureMode::BBFrame)
+        pc.pcap.enabled = false; // GSE only exists in BBFrame captures
+    m_processor = std::make_shared<tbs::bb::Processor>(pc);
+    std::string perr;
+    if (!m_processor->open(&perr))
+        appendLog(tr("ERROR: pcap output: %1").arg(QString::fromStdString(perr)));
+    else if (pc.pcap.enabled)
+        appendLog(tr("Extracting GSE IP packets to %1").arg(QString::fromStdString(tbs::bb::PcapWriter::resolvePath(pc.pcap))));
+    m_controller->setProcessor(m_processor);
+    m_services->reset();
+    m_ip->reset();
+    m_procTimer->start();
+
     m_controller->start(m_config);
 }
 
@@ -490,11 +520,19 @@ void MainWindow::onStateChanged(int state, const QString &error)
     if (!error.isEmpty()) {
         m_hadError = true;
         m_statusText->setText(error);
-        m_tabs->setCurrentIndex(2); // the log holds the diagnostics
+        m_tabs->setCurrentWidget(m_logTab); // the log holds the diagnostics
     }
     if (s == tbs::ReceiverState::Running) {
         m_pill->setState(StatusPill::Kind::Warning, tr("SEARCHING"));
     } else if (s == tbs::ReceiverState::Stopped) {
+        m_procTimer->stop();
+        if (m_processor) {
+            m_processor->close();
+            refreshProcessing();
+            const auto snap = m_processor->snapshot();
+            if (!snap.pcapFile.empty())
+                appendLog(tr("pcap closed: %1 (%2 packets)").arg(QString::fromStdString(snap.pcapFile)).arg(snap.pcapPackets));
+        }
         m_controller->setPreviewEnabled(false);
 #ifdef TBS_HAVE_FFMPEG
         m_decoder->stop();
@@ -591,6 +629,29 @@ void MainWindow::appendLog(const QString &message)
                                t.ink.name(), message.toHtmlEscaped()));
 }
 
+void MainWindow::showTab(const QString &name)
+{
+    static const QStringList names = {QStringLiteral("overview"), QStringLiteral("services"), QStringLiteral("ip"),
+                                      QStringLiteral("pids"), QStringLiteral("log")};
+    const int i = names.indexOf(name.toLower());
+    if (i >= 0)
+        m_tabs->setCurrentIndex(i);
+}
+
+void MainWindow::refreshProcessing()
+{
+    if (!m_processor)
+        return;
+    const tbs::bb::ProcessorSnapshot snap = m_processor->snapshot();
+    m_services->updateSnapshot(snap);
+    m_ip->updateSnapshot(snap);
+    m_overview->updateContent(snap);
+    // In TS mode the PID table shows what each PID carries
+    for (const auto &st : snap.streams)
+        if (st.content == tbs::bb::StreamContent::TsInput)
+            m_pids->setPidUsage(st.ts.pidUsage);
+}
+
 void MainWindow::runDiagnostics()
 {
     const tbs::ReceiverConfig cfg = currentConfig();
@@ -619,7 +680,7 @@ void MainWindow::runDiagnostics()
             appendLog(QStringLiteral("        → ") + QString::fromStdString(i.hint));
     }
     appendLog(ok ? tr("Diagnostics: no problems found") : tr("Diagnostics: problems found, see the hints above"));
-    m_tabs->setCurrentIndex(2);
+    m_tabs->setCurrentWidget(m_logTab);
 }
 
 // ---------------------------------------------------------------------------
