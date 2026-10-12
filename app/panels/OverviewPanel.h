@@ -42,6 +42,7 @@ private:
     QLabel *m_tei = nullptr;
     QLabel *m_sync = nullptr;
     QLabel *m_overflows = nullptr;
+    QLabel *m_pipeline = nullptr;
 
     QFrame *m_bbCard = nullptr;
     QLabel *m_bbContent = nullptr;

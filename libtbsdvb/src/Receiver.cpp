@@ -1,5 +1,6 @@
 #include "tbsdvb/Receiver.h"
 
+#include "ChunkQueue.h"
 #include "Util.h"
 #include "tbsdvb/BbFrameExtractor.h"
 #include "tbsdvb/BbFrameToTs.h"
@@ -20,6 +21,7 @@ struct Receiver::Impl
     Callbacks cb;
     std::vector<std::shared_ptr<IOutputSink>> extraSinks;
     int statusIntervalMs = 500;
+    size_t pipelineBytes = 128u << 20;
 
     std::thread thread;
     std::atomic<bool> stopRequested{false};
@@ -75,6 +77,11 @@ void Receiver::addSink(std::shared_ptr<IOutputSink> sink)
 void Receiver::clearSinks()
 {
     d->extraSinks.clear();
+}
+
+void Receiver::setPipelineBufferSize(size_t bytes)
+{
+    d->pipelineBytes = bytes;
 }
 
 void Receiver::setStatusInterval(int ms)
@@ -232,112 +239,170 @@ void Receiver::Impl::run(ReceiverConfig cfg)
             bbSinks.push_back(s.get());
     }
 
-    std::vector<uint8_t> buf(188 * 2048);
-    std::vector<uint8_t> previewBuf;
-    previewBuf.reserve(188 * 512);
-    TsAnalyzer ts;
-    BbFrameExtractor bbx;
-    BbFrameToTs bb2ts;
-    BbHeader lastHeader;
-    bool haveHeader = false;
-    bool previewOn = false;
-
-    auto previewPacket = [&](const uint8_t *pkt) { previewBuf.insert(previewBuf.end(), pkt, pkt + 188); };
-
-    auto onFrame = [&](const uint8_t *frame, size_t len, const BbHeader &hdr) {
-        lastHeader = hdr;
-        haveHeader = true;
-        for (IOutputSink *s : bbSinks)
-            s->writeBbFrame(frame, len, hdr);
-        if (cb.onBbFrame)
-            cb.onBbFrame(frame, len, hdr);
-        if (previewOn)
-            bb2ts.pushFrame(frame, len, hdr, previewPacket);
-    };
-
-    auto onPackets = [&](const uint8_t *pk, size_t count) {
-        for (IOutputSink *s : tsSinks)
-            s->writeTs(pk, count);
-        if (cb.onTsPackets)
-            cb.onTsPackets(pk, count);
-        if (!bbMode) {
-            if (previewOn && cb.onPreviewTs)
-                cb.onPreviewTs(pk, count * 188);
-            return;
-        }
-        for (size_t i = 0; i < count; ++i)
-            bbx.pushPacket(pk + i * 188, onFrame);
-    };
-
+    ChunkQueue queue(pipelineBytes);
+    std::atomic<uint64_t> bytesIn{0};
+    std::atomic<uint64_t> overflows{0};
     const int64_t t0 = util::nowMs();
-    int64_t lastReport = t0;
-    uint64_t bytesIn = 0;
-    uint64_t lastBytes = 0;
-    uint64_t lastFrames = 0;
-    uint64_t lastPayload = 0;
+
+    // ---------------------------------------------------------------------
+    // Processing thread: parsing, sinks, callbacks and the stream statistics
+    // ---------------------------------------------------------------------
+    uint64_t finalPackets = 0;
+    uint64_t finalFrames = 0;
+    std::thread processing([&]() {
+        TsAnalyzer ts;
+        BbFrameExtractor bbx;
+        BbFrameToTs bb2ts;
+        BbHeader lastHeader;
+        bool haveHeader = false;
+        bool previewOn = false;
+        std::vector<uint8_t> previewBuf;
+        previewBuf.reserve(188 * 512);
+
+        auto previewPacket = [&](const uint8_t *pkt) { previewBuf.insert(previewBuf.end(), pkt, pkt + 188); };
+        auto onFrame = [&](const uint8_t *frame, size_t len, const BbHeader &hdr) {
+            lastHeader = hdr;
+            haveHeader = true;
+            for (IOutputSink *s : bbSinks)
+                s->writeBbFrame(frame, len, hdr);
+            if (cb.onBbFrame)
+                cb.onBbFrame(frame, len, hdr);
+            if (previewOn)
+                bb2ts.pushFrame(frame, len, hdr, previewPacket);
+        };
+        auto onPackets = [&](const uint8_t *pk, size_t count) {
+            for (IOutputSink *s : tsSinks)
+                s->writeTs(pk, count);
+            if (cb.onTsPackets)
+                cb.onTsPackets(pk, count);
+            if (!bbMode) {
+                if (previewOn && cb.onPreviewTs)
+                    cb.onPreviewTs(pk, count * 188);
+                return;
+            }
+            for (size_t i = 0; i < count; ++i)
+                bbx.pushPacket(pk + i * 188, onFrame);
+        };
+
+        int64_t lastReport = t0;
+        uint64_t lastBytes = 0;
+        uint64_t lastFrames = 0;
+        uint64_t lastPayload = 0;
+        uint64_t lastDropped = 0;
+        bool warnedNoBb = false;
+        bool fileErrorReported = false;
+
+        auto report = [&](int64_t now) {
+            const double dt = std::max<int64_t>(now - lastReport, 1) / 1000.0;
+            lastReport = now;
+            StreamStats st;
+            st.elapsedSec = (now - t0) / 1000.0;
+            st.bytesIn = bytesIn.load();
+            st.inputMbps = (st.bytesIn - lastBytes) * 8.0 / dt / 1e6;
+            lastBytes = st.bytesIn;
+            st.driverOverflows = overflows.load();
+            const ChunkQueue::Stats q = queue.stats();
+            st.pipelineCapacityBytes = q.capacity;
+            st.pipelineQueuedBytes = q.queued;
+            st.pipelinePeakBytes = q.peak;
+            st.pipelineDroppedBytes = q.droppedBytes;
+            if (q.droppedBytes > lastDropped) {
+                log(util::format("WARNING: processing cannot keep up, %llu bytes dropped (buffer %llu MiB). Check the "
+                                 "disk / network outputs.",
+                                 static_cast<unsigned long long>(q.droppedBytes - lastDropped),
+                                 static_cast<unsigned long long>(q.capacity >> 20)));
+                lastDropped = q.droppedBytes;
+            }
+            st.tsPackets = ts.packets();
+            st.syncLosses = ts.syncLosses();
+            st.ccErrors = ts.ccErrors();
+            st.teiErrors = ts.teiErrors();
+            st.pidCounts = ts.pidSnapshot();
+            st.bbFrames = bbx.frames();
+            st.bbFramesPerSec = (bbx.frames() - lastFrames) / dt;
+            st.bbPayloadMbps = (bbx.payloadBytes() - lastPayload) * 8.0 / dt / 1e6;
+            lastFrames = bbx.frames();
+            lastPayload = bbx.payloadBytes();
+            st.bbCrcErrors = bbx.crcErrors();
+            st.bbSequenceErrors = bbx.sequenceErrors();
+            st.bbLengthErrors = bbx.lengthErrors();
+            st.hasBbHeader = haveHeader;
+            st.lastBbHeader = lastHeader;
+            if (fileSink) {
+                fileSink->fillStats(st);
+                if (!fileSink->lastError().empty() && !fileErrorReported) {
+                    fileErrorReported = true;
+                    log("ERROR: recording stopped: " + fileSink->lastError());
+                }
+            }
+            if (zmqSink) {
+                st.zmqMessages = zmqSink->messages();
+                st.zmqDropped = zmqSink->dropped();
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                stats = st;
+            }
+            if (cb.onStats)
+                cb.onStats(st);
+
+            if (bbMode && !warnedNoBb && st.elapsedSec > 3.0 && ts.packets() > 1000 && bbx.carrierPackets() == 0) {
+                warnedNoBb = true;
+                log("WARNING: TS is arriving but no BBFrame packets (PID 0x010E/0x0118). The driver only outputs "
+                    "BBFrames in BBFrame mode (Linux: stid135 bbframe=1) and for Generic Stream/GSE carriers.");
+            }
+        };
+
+        while (true) {
+            bool finished = false;
+            std::unique_ptr<ChunkQueue::Chunk> c = queue.pop(50, &finished);
+            if (c) {
+                if (c->reset) {
+                    ts.reset();
+                    bbx.reset();
+                    bb2ts.reset();
+                } else {
+                    previewOn = preview.load() && static_cast<bool>(cb.onPreviewTs);
+                    ts.push(c->data.data(), c->len, onPackets);
+                    if (!previewBuf.empty()) {
+                        if (previewOn)
+                            cb.onPreviewTs(previewBuf.data(), previewBuf.size());
+                        previewBuf.clear();
+                    }
+                }
+                queue.recycle(std::move(c));
+            } else if (finished) {
+                break;
+            }
+            const int64_t now = util::nowMs();
+            if (now - lastReport >= statusIntervalMs)
+                report(now);
+        }
+        report(util::nowMs());
+        finalPackets = ts.packets();
+        finalFrames = bbx.frames();
+    });
+
+    // ---------------------------------------------------------------------
+    // Capture thread (this one): device reads, retunes, frontend status
+    // ---------------------------------------------------------------------
+    constexpr size_t kReadSize = 188 * 2048;
+    int64_t lastStatus = t0;
     bool wasLocked = false;
-    bool warnedNoBb = false;
-    bool fileErrorReported = false;
     std::string error;
 
-    auto report = [&](int64_t now) {
-        const double dt = std::max<int64_t>(now - lastReport, 1) / 1000.0;
-        lastReport = now;
-
+    auto status_ = [&]() {
         FrontendStatus fe = device->readStatus();
         if (fe.locked() != wasLocked) {
             wasLocked = fe.locked();
             log(wasLocked ? std::string("Frontend LOCKED") : "Frontend lost lock (" + DvbNames::statusFlags(fe.flags) + ")");
         }
-
-        StreamStats st;
-        st.elapsedSec = (now - t0) / 1000.0;
-        st.bytesIn = bytesIn;
-        st.inputMbps = (bytesIn - lastBytes) * 8.0 / dt / 1e6;
-        lastBytes = bytesIn;
-        st.driverOverflows = device->overflows();
-        st.tsPackets = ts.packets();
-        st.syncLosses = ts.syncLosses();
-        st.ccErrors = ts.ccErrors();
-        st.teiErrors = ts.teiErrors();
-        st.pidCounts = ts.pidSnapshot();
-        st.bbFrames = bbx.frames();
-        st.bbFramesPerSec = (bbx.frames() - lastFrames) / dt;
-        st.bbPayloadMbps = (bbx.payloadBytes() - lastPayload) * 8.0 / dt / 1e6;
-        lastFrames = bbx.frames();
-        lastPayload = bbx.payloadBytes();
-        st.bbCrcErrors = bbx.crcErrors();
-        st.bbSequenceErrors = bbx.sequenceErrors();
-        st.bbLengthErrors = bbx.lengthErrors();
-        st.hasBbHeader = haveHeader;
-        st.lastBbHeader = lastHeader;
-        if (fileSink) {
-            st.fileBytes = fileSink->bytesWritten();
-            st.fileName = fileSink->fileName();
-            if (!fileSink->lastError().empty() && !fileErrorReported) {
-                fileErrorReported = true;
-                log("ERROR: file write failed: " + fileSink->lastError());
-            }
-        }
-        if (zmqSink) {
-            st.zmqMessages = zmqSink->messages();
-            st.zmqDropped = zmqSink->dropped();
-        }
         {
             std::lock_guard<std::mutex> lock(mutex);
             status = fe;
-            stats = st;
         }
         if (cb.onStatus)
             cb.onStatus(fe);
-        if (cb.onStats)
-            cb.onStats(st);
-
-        if (bbMode && !warnedNoBb && st.elapsedSec > 3.0 && ts.packets() > 1000 && bbx.carrierPackets() == 0) {
-            warnedNoBb = true;
-            log("WARNING: TS is arriving but no BBFrame packets (PID 0x010E/0x0118). The driver only outputs "
-                "BBFrames in BBFrame mode (Linux: stid135 bbframe=1) and for Generic Stream/GSE carriers.");
-        }
     };
 
     while (!stopRequested.load()) {
@@ -354,38 +419,43 @@ void Receiver::Impl::run(ReceiverConfig cfg)
             } else {
                 log("ERROR: retune failed: " + tuneErr);
             }
-            ts.reset();
-            bbx.reset();
-            bb2ts.reset();
+            auto marker = queue.acquire(0);
+            marker->reset = true;
+            queue.push(std::move(marker), true);
         }
 
-        const long n = device->read(buf.data(), buf.size(), 100);
+        auto chunk = queue.acquire(kReadSize);
+        const long n = device->read(chunk->data.data(), kReadSize, 100);
+        overflows = device->overflows();
         if (n < 0) {
+            queue.recycle(std::move(chunk));
             error = "Read error from device";
             break;
         }
         if (n > 0) {
+            chunk->len = static_cast<size_t>(n);
             bytesIn += static_cast<uint64_t>(n);
-            previewOn = preview.load() && static_cast<bool>(cb.onPreviewTs);
-            ts.push(buf.data(), static_cast<size_t>(n), onPackets);
-            if (!previewBuf.empty()) {
-                if (previewOn)
-                    cb.onPreviewTs(previewBuf.data(), previewBuf.size());
-                previewBuf.clear();
-            }
+            queue.push(std::move(chunk));
+        } else {
+            queue.recycle(std::move(chunk));
         }
 
         const int64_t now = util::nowMs();
-        if (now - lastReport >= statusIntervalMs)
-            report(now);
-
+        if (now - lastStatus >= statusIntervalMs) {
+            lastStatus = now;
+            status_();
+        }
         if (device->atEnd())
             break;
     }
 
-    report(util::nowMs());
-    log(util::format("Capture stopped: %llu bytes, %llu TS packets, %llu BBFrames", static_cast<unsigned long long>(bytesIn),
-                     static_cast<unsigned long long>(ts.packets()), static_cast<unsigned long long>(bbx.frames())));
+    // Let the processing thread drain what is buffered, then shut down
+    queue.close();
+    processing.join();
+    status_();
+    log(util::format("Capture stopped: %llu bytes, %llu TS packets, %llu BBFrames",
+                     static_cast<unsigned long long>(bytesIn.load()), static_cast<unsigned long long>(finalPackets),
+                     static_cast<unsigned long long>(finalFrames)));
     finish(error);
 }
 

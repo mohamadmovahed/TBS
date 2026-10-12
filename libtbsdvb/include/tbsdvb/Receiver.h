@@ -27,7 +27,12 @@ namespace tbs {
 //   ... rx.status(), rx.stats(), rx.retune(newTuning) ...
 //   rx.stop();
 //
-// All callbacks run on the receiver's worker thread and must not block.
+// Two worker threads are used: the capture thread owns the device (reads,
+// retunes, onStatus) and hands the data through a bounded buffer to the
+// processing thread (parsing, sinks, onTsPackets/onBbFrame/onPreviewTs, onStats).
+// A slow sink therefore cannot stall the device; if the buffer overflows the
+// data is dropped and counted in StreamStats::pipelineDroppedBytes.
+// Callbacks must not block for long.
 class TBSDVB_API Receiver
 {
 public:
@@ -57,6 +62,8 @@ public:
     void addSink(std::shared_ptr<IOutputSink> sink);
     void clearSinks();
     void setStatusInterval(int ms);
+    // Size of the buffer between the capture and the processing thread (default 128 MiB)
+    void setPipelineBufferSize(size_t bytes);
 
     // Starts the capture thread. Returns false if already running. Opening errors are
     // reported through onStateChanged(Stopped, error) / lastError().

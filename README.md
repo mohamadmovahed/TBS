@@ -133,6 +133,15 @@ Other public pieces you can use on their own:
 - `TsAnalyzer`, `BbFrameExtractor`, `BbFrameToTs` and `BbHeader` are parsers you can use without a device.
 - `FileSink`, `ZmqSink`, or your own `IOutputSink` via `Receiver::addSink()`.
 
+**Threads.** The receiver uses two threads, joined by a bounded buffer (128 MiB by default; set it
+with `setPipelineBufferSize`).
+- **Capture thread:** owns the device (reads, retunes, `onStatus`).
+- **Processing thread:** does the parsing, the sinks, the data callbacks and `onStats`.
+
+A slow disk or network output therefore never stalls the device. If processing falls behind for longer than
+the buffer covers, data is dropped and counted (`StreamStats::pipelineDroppedBytes`), not lost silently. Callbacks
+can run on either thread.
+
 **C API** (`#include <tbsdvb/tbsdvb_c.h>`) for C, Python (ctypes), C# and others:
 `tbs_config_init`, `tbs_enumerate_devices`, `tbs_receiver_create/start/stop/retune/get_status/get_stats`, and
 log, state and data callbacks. See `tools/c_api_example.c`. Build with `-DTBSDVB_BUILD_SHARED=ON` to get a
@@ -145,7 +154,13 @@ DLL/.so for other languages.
   The tuner IF is computed and checked live. While capturing, change the tuning and press **Apply tuning**
   to retune without stopping.
 * **Outputs**:
-  * a file: `.ts`, or BBFrames as raw, `0xB8`-prefixed, or the pseudo-TS as received;
+  * a file: `.ts`, or BBFrames as raw, `0xB8`-prefixed, or the pseudo-TS as received. Recording management:
+    * a new file every N MiB and/or N minutes (`name_001.ts`, `name_002.ts`, ...); BBFrame segments start on a
+      frame boundary;
+    * **Keep newest N** for a rolling recording;
+    * a clean stop when free disk space drops below a limit (default 500 MiB) or on a write error.
+
+    The Overview shows the current segment, the free space and the processing-buffer level.
   * ZeroMQ: PUB or PUSH, bind or connect, optional topic and metadata header;
   * the video preview, which can be switched on or off while running.
 * **Status**:
@@ -309,6 +324,17 @@ tbs-cli --device linux:0:0 --freq 11494 --sr 27500 --pol h --out capture.ts
 tbs-cli --device bda:0 --freq 10971 --sr 29700 --pol h --isi 3 --bbframe --zmq tcp://*:5555 --push
 ```
 Run `tbs-cli --help` for all options: LNB, tone, DiSEqC, PLS, file formats, ZeroMQ options and `--duration`.
+
+Rolling recording, for example 1 GiB files, keeping the last 24, and stopping below 2 GiB free:
+```
+tbs-cli --device linux:0:0 --freq 11494 --sr 27500 --out /data/cap.ts --split-size 1024 --keep 24 --min-free 2048
+```
+
+## Quality checks
+
+- Unit and end-to-end tests run under AddressSanitizer + UBSan (`-DTBS_SANITIZE=ON`) and ThreadSanitizer in CI.
+- The parsers for received data are fuzzed with libFuzzer. See [fuzz/README.md](fuzz/README.md) for the
+  targets, how to run them, and the bugs fuzzing has found.
 
 ## Source layout
 

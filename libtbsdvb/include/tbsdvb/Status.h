@@ -68,6 +68,12 @@ struct TBSDVB_API StreamStats
     double inputMbps = 0.0;
     uint64_t driverOverflows = 0;
 
+    // Hand-over buffer between the capture and the processing thread
+    uint64_t pipelineCapacityBytes = 0;
+    uint64_t pipelineQueuedBytes = 0;
+    uint64_t pipelinePeakBytes = 0;
+    uint64_t pipelineDroppedBytes = 0; // data lost because processing could not keep up
+
     uint64_t tsPackets = 0;
     uint64_t syncLosses = 0;
     uint64_t ccErrors = 0;
@@ -83,8 +89,11 @@ struct TBSDVB_API StreamStats
     bool hasBbHeader = false;
     BbHeader lastBbHeader;
 
-    uint64_t fileBytes = 0;
-    std::string fileName;
+    uint64_t fileBytes = 0;     // all segments of this recording
+    std::string fileName;       // current segment
+    uint32_t fileSegments = 0;  // files written so far
+    bool fileStopped = false;   // recording ended early (disk full, write error)
+    int64_t fileFreeBytes = -1; // free space on the recording volume (-1 = unknown)
     uint64_t zmqMessages = 0;
     uint64_t zmqDropped = 0;
 };

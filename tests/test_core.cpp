@@ -8,8 +8,10 @@
 #include "tbsdvb/Types.h"
 
 #include "tbsdvb/Receiver.h"
+#include "tbsdvb/Sink.h"
 
 #include <chrono>
+#include <memory>
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
@@ -369,6 +371,103 @@ static void testLinuxDiagnostics()
 }
 #endif
 
+// A sink that is too slow: the capture thread must not stall, data is dropped and counted
+class SlowSink : public IOutputSink
+{
+public:
+    bool open(std::string *) override { return true; }
+    void close() override {}
+    bool acceptsTs(CaptureMode) const override { return true; }
+    bool acceptsBbFrames(CaptureMode) const override { return false; }
+    void writeTs(const uint8_t *, size_t count) override
+    {
+        packets += count;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    void writeBbFrame(const uint8_t *, size_t, const BbHeader &) override {}
+    size_t packets = 0;
+};
+
+static void testPipelineBackpressure()
+{
+    const std::string in = "tbs_test_pipe.ts";
+    {
+        std::FILE *f = std::fopen(in.c_str(), "wb");
+        for (int i = 0; i < 60000; ++i) { // ~11 MB
+            Bytes p = builders::makeTsPacket(0x100, static_cast<uint8_t>(i), 0x11);
+            std::fwrite(p.data(), 1, 188, f);
+        }
+        std::fclose(f);
+    }
+    ReceiverConfig cfg;
+    cfg.device.kind = DeviceKind::FileReplay;
+    cfg.device.replayFile = in;
+    cfg.device.replayLoop = false;
+
+    Receiver rx;
+    auto sink = std::make_shared<SlowSink>();
+    rx.addSink(sink);
+    rx.setPipelineBufferSize(1u << 20); // tiny buffer
+    rx.setStatusInterval(50);
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(rx.start(cfg));
+    for (int i = 0; i < 500 && rx.isRunning(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    rx.stop();
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const StreamStats st = rx.stats();
+    CHECK_EQ(st.bytesIn, 60000u * 188);        // the reader consumed everything
+    CHECK(st.pipelineDroppedBytes > 0);          // ... and dropped what processing could not take
+    CHECK(st.pipelineCapacityBytes == (1u << 20));
+    CHECK_EQ(st.tsPackets * 188 + st.pipelineDroppedBytes, st.bytesIn);
+    CHECK_EQ(sink->packets, st.tsPackets);
+    CHECK(secs < 5.0);
+    std::remove(in.c_str());
+}
+
+static void testFileSegments()
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::absolute("tbs_test_rec");
+    fs::remove_all(dir);
+    FileOutputOptions opt;
+    opt.enabled = true;
+    opt.path = (dir / "cap.ts").string();
+    opt.timestampSuffix = false;
+    opt.splitSizeMB = 1;
+    opt.keepFiles = 2;
+    opt.minFreeMB = 1;
+    FileSink sink(opt, CaptureMode::TransportStream);
+    std::string err;
+    CHECK(sink.open(&err));
+    std::vector<uint8_t> chunk(188 * 1000, 0x47); // 188000 bytes per write
+    // A segment is closed once it holds >= 1 MiB: 6 writes (1,128,000 bytes) -> 30 writes = 5 segments
+    for (int i = 0; i < 30; ++i)
+        sink.writeTs(chunk.data(), 1000);
+    sink.close();
+    CHECK_EQ(sink.segments(), 5u);
+    CHECK_EQ(sink.bytesWritten(), 30u * 188000);
+    CHECK(!fs::exists(dir / "cap_001.ts")); // rolled out (keep 2)
+    CHECK(!fs::exists(dir / "cap_003.ts"));
+    CHECK(fs::exists(dir / "cap_004.ts"));
+    CHECK(fs::exists(dir / "cap_005.ts"));
+    CHECK_EQ(fs::file_size(dir / "cap_004.ts"), 6u * 188000);
+    StreamStats st;
+    sink.fillStats(st);
+    CHECK(st.fileName.find("cap_005.ts") != std::string::npos);
+    CHECK(st.fileFreeBytes > 0);
+    CHECK(!st.fileStopped);
+
+    // Not enough free space: refuse to start
+    FileOutputOptions full = opt;
+    full.path = (dir / "full.ts").string();
+    full.minFreeMB = 1ull << 40; // 1 EiB
+    FileSink fullSink(full, CaptureMode::TransportStream);
+    CHECK(!fullSink.open(&err));
+    CHECK(err.find("free disk space") != std::string::npos);
+    fs::remove_all(dir);
+}
+
 int main()
 {
     testCrc8();
@@ -381,6 +480,8 @@ int main()
     testRoundTrip(true, 333);
     testExtractorErrors();
     testReceiverReplay();
+    testPipelineBackpressure();
+    testFileSegments();
 #if defined(TBS_TEST_LINUX_INTERNALS)
     testLinuxDiagnostics();
 #endif

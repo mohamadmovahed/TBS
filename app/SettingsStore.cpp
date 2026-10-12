@@ -70,6 +70,10 @@ tbs::ReceiverConfig load(QSettings &s)
     c.file.path = readString(s, "filePath", d.file.path);
     c.file.timestampSuffix = read(s, "fileTimestampSuffix", d.file.timestampSuffix);
     c.file.bbFormat = readEnum(s, "bbFileFormat", d.file.bbFormat);
+    c.file.splitSizeMB = read(s, "fileSplitSizeMB", static_cast<qulonglong>(d.file.splitSizeMB));
+    c.file.splitMinutes = read(s, "fileSplitMinutes", d.file.splitMinutes);
+    c.file.keepFiles = read(s, "fileKeepFiles", d.file.keepFiles);
+    c.file.minFreeMB = read(s, "fileMinFreeMB", static_cast<qulonglong>(d.file.minFreeMB));
     c.zmq.enabled = read(s, "zmqEnabled", d.zmq.enabled);
     c.zmq.endpoint = readString(s, "zmqEndpoint", d.zmq.endpoint);
     c.zmq.socket = readEnum(s, "zmqSocket", d.zmq.socket);
@@ -118,6 +122,10 @@ void save(QSettings &s, const tbs::ReceiverConfig &c)
     writeString(s, "filePath", c.file.path);
     s.setValue(QStringLiteral("fileTimestampSuffix"), c.file.timestampSuffix);
     writeEnum(s, "bbFileFormat", c.file.bbFormat);
+    s.setValue(QStringLiteral("fileSplitSizeMB"), static_cast<qulonglong>(c.file.splitSizeMB));
+    s.setValue(QStringLiteral("fileSplitMinutes"), c.file.splitMinutes);
+    s.setValue(QStringLiteral("fileKeepFiles"), c.file.keepFiles);
+    s.setValue(QStringLiteral("fileMinFreeMB"), static_cast<qulonglong>(c.file.minFreeMB));
     s.setValue(QStringLiteral("zmqEnabled"), c.zmq.enabled);
     writeString(s, "zmqEndpoint", c.zmq.endpoint);
     writeEnum(s, "zmqSocket", c.zmq.socket);

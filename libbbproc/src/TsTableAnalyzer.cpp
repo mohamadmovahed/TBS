@@ -254,6 +254,14 @@ void TsTableAnalyzer::onSection(uint16_t pid, const uint8_t *s, size_t len)
     ++st.sections;
     ++m_sections;
 
+    // PAT, CAT, PMT, NIT, SDT, BAT and EIT are always long-form sections with a
+    // CRC: reject anything else before the parsers index into it (found by fuzzing)
+    const bool longForm = tableId <= 0x02 || (tableId >= 0x40 && tableId <= 0x6F);
+    if (longForm && !syntax) {
+        ++st.crcErrors;
+        ++m_crcErrors;
+        return;
+    }
     if (syntax || tableId == 0x73) {
         if (len < (syntax ? 12u : 14u) || crc32Mpeg(s, len) != 0) {
             ++st.crcErrors;
@@ -293,6 +301,8 @@ void TsTableAnalyzer::onSection(uint16_t pid, const uint8_t *s, size_t len)
 
 void TsTableAnalyzer::parsePat(const uint8_t *s, size_t len, int version)
 {
+    if (len < 12)
+        return;
     m_patSeen = true;
     m_tsid = u16(s + 3);
     m_patVersion = version;
@@ -322,6 +332,8 @@ void TsTableAnalyzer::parsePat(const uint8_t *s, size_t len, int version)
 
 void TsTableAnalyzer::parseCat(const uint8_t *s, size_t len)
 {
+    if (len < 12)
+        return;
     std::vector<CaInfo> emm;
     forEachDescriptor(s + 8, len - 12, [&](uint8_t tag, const uint8_t *d, size_t dl) {
         if (tag == 0x09 && dl >= 4)
@@ -332,6 +344,8 @@ void TsTableAnalyzer::parseCat(const uint8_t *s, size_t len)
 
 void TsTableAnalyzer::parsePmt(uint16_t pid, const uint8_t *s, size_t len, int version)
 {
+    if (len < 16)
+        return;
     const uint16_t number = u16(s + 3);
     ProgramInfo &prog = m_programs[number];
     prog.programNumber = number;
@@ -461,6 +475,8 @@ void TsTableAnalyzer::parsePmt(uint16_t pid, const uint8_t *s, size_t len, int v
 
 void TsTableAnalyzer::parseNitBat(const uint8_t *s, size_t len, bool bat, int version)
 {
+    if (len < 16)
+        return;
     const uint16_t id = u16(s + 3);
     const size_t end = len - 4;
     const size_t descLen = u16(s + 8) & 0x0FFF;
@@ -548,6 +564,8 @@ void TsTableAnalyzer::parseNitBat(const uint8_t *s, size_t len, bool bat, int ve
 
 void TsTableAnalyzer::parseSdt(const uint8_t *s, size_t len)
 {
+    if (len < 15)
+        return;
     const bool actual = s[0] == 0x42;
     const uint16_t tsid = u16(s + 3);
     const uint16_t onid = u16(s + 8);

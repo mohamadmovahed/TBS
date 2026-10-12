@@ -10,3 +10,4 @@ tbs_test_*.ts
 tbs_test_*.bbf
 tbs_test_root/
 tbs_test_*.pcap
+tbs_test_rec/

@@ -285,6 +285,15 @@ static void testPsi()
     const TsReport r2 = a.report();
     CHECK_EQ(r2.crcErrors, 1u);
     CHECK_EQ(r2.tsid, 0x0457);
+
+    // Short-form (syntax bit 0) sections for long-form tables are rejected (fuzzing regression)
+    const uint8_t shortPat[] = {0x00, 0x00, 0x02, 0x12, 0x34};
+    a.pushSection(0x0000, shortPat, sizeof(shortPat));
+    const uint8_t shortCat[] = {0x01, 0x00, 0x00};
+    a.pushSection(0x0001, shortCat, sizeof(shortCat));
+    const TsReport r3 = a.report();
+    CHECK_EQ(r3.crcErrors, 3u);
+    CHECK_EQ(r3.tsid, 0x0457);
 }
 
 // ---------------------------------------------------------------------------

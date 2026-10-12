@@ -103,6 +103,11 @@ struct TBSDVB_API FileOutputOptions
     std::string path;            // empty = <home>/capture.ts|.bbf
     bool timestampSuffix = true;
     BbFileFormat bbFormat = BbFileFormat::Raw;
+    // Recording management
+    uint64_t splitSizeMB = 0;  // start a new file every N MiB (0 = never)
+    int splitMinutes = 0;      // start a new file every N minutes (0 = never)
+    int keepFiles = 0;         // with splitting: keep only the newest N files (0 = keep all)
+    uint64_t minFreeMB = 500;  // stop recording when free disk space drops below N MiB (0 = no check)
 };
 
 struct TBSDVB_API ZmqOutputOptions

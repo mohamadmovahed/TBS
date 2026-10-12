@@ -15,6 +15,20 @@ option(TBS_BUILD_GUI    "Build the Qt GUI application (tbs-receiver)" ON)
 option(TBS_BUILD_TOOLS  "Build tbs-cli, tbs-make-test-stream and the C API example" ON)
 option(TBS_BUILD_TESTS  "Build unit tests" ON)
 option(TBS_ENABLE_FFMPEG "Video preview in the GUI (needs FFmpeg)" ON)
+option(TBS_SANITIZE     "Build everything with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+option(TBS_BUILD_FUZZERS "Build the fuzz targets (libFuzzer with Clang; corpus replay otherwise)" OFF)
+
+if(TBS_SANITIZE OR (TBS_BUILD_FUZZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
+    if(MSVC)
+        add_compile_options(/fsanitize=address)
+    else()
+        add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
+        add_link_options(-fsanitize=address,undefined)
+        if(TBS_BUILD_FUZZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            add_compile_options(-fsanitize=fuzzer-no-link) # coverage for the libraries
+        endif()
+    endif()
+endif()
 
 # ---- The library (no Qt) ----
 add_subdirectory(libtbsdvb)
@@ -54,6 +68,12 @@ if(TBS_BUILD_TESTS)
     add_executable(tbs-bbproc-tests tests/test_bbproc.cpp tests/StreamBuilders.h)
     target_link_libraries(tbs-bbproc-tests PRIVATE TbsDvb::tbsbbproc)
     add_test(NAME tbsbbproc COMMAND tbs-bbproc-tests)
+endif()
+
+# ---- Fuzzing ----
+if(TBS_BUILD_FUZZERS)
+    enable_testing()
+    add_subdirectory(fuzz)
 endif()
 
 # ---- GUI ----

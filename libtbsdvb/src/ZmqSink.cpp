@@ -63,6 +63,10 @@ bool ZmqSink::open(std::string *error)
     }
     return true;
 #else
+    (void)m_mode;
+    (void)m_ctx;
+    (void)m_sock;
+    (void)m_seq;
     if (error)
         *error = "This build has no ZeroMQ support (rebuild with libzmq installed)";
     return false;

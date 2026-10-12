@@ -40,6 +40,10 @@ private:
     QWidget *m_fileBox = nullptr;
     QLineEdit *m_filePath = nullptr;
     QCheckBox *m_timestamp = nullptr;
+    QSpinBox *m_splitSize = nullptr;
+    QSpinBox *m_splitMinutes = nullptr;
+    QSpinBox *m_keepFiles = nullptr;
+    QSpinBox *m_minFree = nullptr;
     QComboBox *m_bbFormat = nullptr;
     QLabel *m_bbFormatLabel = nullptr;
 

@@ -80,6 +80,10 @@ ReceiverConfig toConfig(const tbs_config &c)
     r.zmq.metadataHeader = c.zmq_metadata_header != 0;
     r.zmq.tsPacketsPerMessage = c.zmq_ts_packets_per_message;
     r.zmq.sendHwm = c.zmq_send_hwm;
+    r.file.splitSizeMB = c.file_split_size_mb;
+    r.file.splitMinutes = c.file_split_minutes;
+    r.file.keepFiles = c.file_keep_files;
+    r.file.minFreeMB = c.file_min_free_mb;
     return r;
 }
 
@@ -119,6 +123,7 @@ void tbs_config_init(tbs_config *cfg)
     cfg->zmq_bind = d.zmq.bind;
     cfg->zmq_ts_packets_per_message = d.zmq.tsPacketsPerMessage;
     cfg->zmq_send_hwm = d.zmq.sendHwm;
+    cfg->file_min_free_mb = d.file.minFreeMB;
 }
 
 int tbs_enumerate_devices(tbs_device_info *out, int max, int include_replay)
@@ -180,6 +185,7 @@ int tbs_receiver_start(tbs_receiver *rx, const tbs_config *cfg)
             cb.onTsPackets = [rx](const uint8_t *p, size_t n) { rx->dataCb(rx->dataUser, TBS_DATA_TS, p, n * 188); };
     }
     rx->rx.setCallbacks(cb);
+    rx->rx.setPipelineBufferSize(static_cast<size_t>(cfg->pipeline_buffer_mb ? cfg->pipeline_buffer_mb : 128) << 20);
     return rx->rx.start(toConfig(*cfg)) ? 0 : -1;
 }
 
@@ -273,6 +279,11 @@ int tbs_receiver_get_stats(tbs_receiver *rx, tbs_stats *out)
     out->file_bytes = s.fileBytes;
     out->zmq_messages = s.zmqMessages;
     out->zmq_dropped = s.zmqDropped;
+    out->file_segments = s.fileSegments;
+    out->file_stopped = s.fileStopped;
+    out->pipeline_queued_bytes = s.pipelineQueuedBytes;
+    out->pipeline_peak_bytes = s.pipelinePeakBytes;
+    out->pipeline_dropped_bytes = s.pipelineDroppedBytes;
     return 0;
 }
 

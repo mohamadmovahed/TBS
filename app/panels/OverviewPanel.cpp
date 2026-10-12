@@ -55,6 +55,7 @@ OverviewPanel::OverviewPanel(QWidget *parent)
     m_tei = addRow(g, tr("TEI errors"));
     m_sync = addRow(g, tr("Sync losses"));
     m_overflows = addRow(g, tr("Driver overflows"));
+    m_pipeline = addRow(g, tr("Processing buffer"));
 
     m_bbCard = makeCard(tr("Baseband frames"), g);
     m_bbContent = addRow(g, tr("Content"));
@@ -163,6 +164,17 @@ void OverviewPanel::updateStats(const StreamStats &st)
     m_tei->setText(errors(st.teiErrors));
     m_sync->setText(errors(st.syncLosses));
     m_overflows->setText(errors(st.driverOverflows));
+    if (st.pipelineCapacityBytes) {
+        const double fill = 100.0 * st.pipelineQueuedBytes / st.pipelineCapacityBytes;
+        const double peak = 100.0 * st.pipelinePeakBytes / st.pipelineCapacityBytes;
+        QString text = tr("%1 % · peak %2 % of %3").arg(fill, 0, 'f', 0).arg(peak, 0, 'f', 0)
+                           .arg(QLocale().formattedDataSize(static_cast<qint64>(st.pipelineCapacityBytes)));
+        if (st.pipelineDroppedBytes)
+            text += tr(" · dropped %1").arg(QStringLiteral("<span style='color:%1'>● </span>%2")
+                                                  .arg(Theme::tokens().critical.name(),
+                                                       QLocale().formattedDataSize(static_cast<qint64>(st.pipelineDroppedBytes))));
+        m_pipeline->setText(text);
+    }
 
     m_bbFrames->setText(count(st.bbFrames));
     m_bbRate->setText(tr("%1 frames/s · %2 Mbit/s").arg(st.bbFramesPerSec, 0, 'f', 1).arg(st.bbPayloadMbps, 0, 'f', 2));
@@ -184,9 +196,18 @@ void OverviewPanel::updateStats(const StreamStats &st)
         m_bbLengths->setText(QStringLiteral("%1 / %2 / %3 bits").arg(h.upl).arg(h.dfl).arg(h.syncd));
     }
 
-    m_file->setText(st.fileName.empty() ? tr("off")
-                                        : QStringLiteral("%1<br><span style='color:%2'>%3</span>")
-                                              .arg(qs(st.fileName).toHtmlEscaped(), Theme::tokens().muted.name(),
-                                                   QLocale().formattedDataSize(static_cast<qint64>(st.fileBytes))));
+    if (st.fileName.empty()) {
+        m_file->setText(tr("off"));
+    } else {
+        QString details = QLocale().formattedDataSize(static_cast<qint64>(st.fileBytes));
+        if (st.fileSegments > 1)
+            details += tr(" · file %1").arg(st.fileSegments);
+        if (st.fileFreeBytes >= 0)
+            details += tr(" · %1 free").arg(QLocale().formattedDataSize(st.fileFreeBytes));
+        if (st.fileStopped)
+            details += QStringLiteral(" · <span style='color:%1'>● </span>%2").arg(Theme::tokens().critical.name(), tr("stopped"));
+        m_file->setText(QStringLiteral("%1<br><span style='color:%2'>%3</span>")
+                            .arg(qs(st.fileName).toHtmlEscaped(), Theme::tokens().muted.name(), details));
+    }
     m_zmq->setText(tr("%1 messages · %2 dropped").arg(count(st.zmqMessages), errors(st.zmqDropped)));
 }

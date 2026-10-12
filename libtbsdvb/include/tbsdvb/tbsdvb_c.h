@@ -63,6 +63,14 @@ typedef struct tbs_config
     int zmq_metadata_header;
     int zmq_ts_packets_per_message;
     int zmq_send_hwm;
+
+    /* recording management (0 = off) */
+    uint64_t file_split_size_mb;
+    int file_split_minutes;
+    int file_keep_files;
+    uint64_t file_min_free_mb;
+    /* capture -> processing buffer in MiB (0 = default 128) */
+    uint32_t pipeline_buffer_mb;
 } tbs_config;
 
 typedef struct tbs_status
@@ -96,6 +104,9 @@ typedef struct tbs_stats
     uint8_t bb_matype1, bb_matype2;
     uint16_t bb_upl, bb_dfl, bb_syncd;
     uint64_t file_bytes, zmq_messages, zmq_dropped;
+    uint32_t file_segments;
+    int file_stopped;
+    uint64_t pipeline_queued_bytes, pipeline_peak_bytes, pipeline_dropped_bytes;
 } tbs_stats;
 
 typedef struct tbs_device_info

@@ -45,6 +45,9 @@ void usage(const char *argv0)
         "Capture / outputs:\n"
         "  --bbframe                   capture BBFrames instead of TS\n"
         "  --out FILE [--bb-format raw|b8|pseudo] [--timestamp]\n"
+        "      [--split-size MIB] [--split-time MIN] [--keep N] [--min-free MIB]\n"
+        "                              new file every MIB / MIN, keep newest N, stop below MIB free\n"
+        "  --buffer MIB                capture -> processing buffer (default 128)\n"
         "  --zmq ENDPOINT [--push] [--connect] [--topic T] [--header] [--packets N]\n"
         "  --analyze                   analyse the content (TS tables, GSE/IP) and print a report at the end\n"
         "  --pcap FILE [--pcap-raw]    extract IP packets carried in GSE to a pcap file (BBFrame mode)\n"
@@ -107,6 +110,7 @@ int main(int argc, char **argv)
     bool quiet = false;
     bool diagnoseOnly = false;
     bool analyze = false;
+    size_t bufferMB = 128;
     tbs::bb::ProcessorConfig procCfg;
 
     for (int i = 1; i < argc; ++i) {
@@ -181,6 +185,16 @@ int main(int argc, char **argv)
         } else if (a == "--bb-format") {
             const std::string v = next();
             cfg.file.bbFormat = v == "b8" ? tbs::BbFileFormat::B8Marker : v == "pseudo" ? tbs::BbFileFormat::PseudoTs : tbs::BbFileFormat::Raw;
+        } else if (a == "--split-size") {
+            cfg.file.splitSizeMB = std::stoull(next());
+        } else if (a == "--split-time") {
+            cfg.file.splitMinutes = std::stoi(next());
+        } else if (a == "--keep") {
+            cfg.file.keepFiles = std::stoi(next());
+        } else if (a == "--min-free") {
+            cfg.file.minFreeMB = std::stoull(next());
+        } else if (a == "--buffer") {
+            bufferMB = std::stoul(next());
         } else if (a == "--zmq") {
             cfg.zmq.enabled = true;
             cfg.zmq.endpoint = next();
@@ -242,10 +256,12 @@ int main(int argc, char **argv)
             std::snprintf(cnr, sizeof(cnr), "%.1f dB", st.cnrDb);
         else if (st.hasCnrPercent)
             std::snprintf(cnr, sizeof(cnr), "%.0f %%", st.cnrPercent);
-        std::fprintf(stderr, "\r[%s] level %s  C/N %s  %.2f Mbit/s  TS %llu  CC %llu  BB %llu (crc %llu)   ",
+        std::fprintf(stderr, "\r[%s] level %s  C/N %s  %.2f Mbit/s  TS %llu  CC %llu  BB %llu (crc %llu)  buf %llu%%%s   ",
                      st.locked() ? "LOCK" : "----", level.c_str(), cnr, s.inputMbps,
                      static_cast<unsigned long long>(s.tsPackets), static_cast<unsigned long long>(s.ccErrors),
-                     static_cast<unsigned long long>(s.bbFrames), static_cast<unsigned long long>(s.bbCrcErrors));
+                     static_cast<unsigned long long>(s.bbFrames), static_cast<unsigned long long>(s.bbCrcErrors),
+                     static_cast<unsigned long long>(s.pipelineCapacityBytes ? 100 * s.pipelineQueuedBytes / s.pipelineCapacityBytes : 0),
+                     s.pipelineDroppedBytes ? " DROPPING" : "");
     };
     std::shared_ptr<tbs::bb::Processor> proc;
     if (analyze) {
@@ -262,6 +278,7 @@ int main(int argc, char **argv)
     }
     rx.setCallbacks(cb);
     rx.setStatusInterval(1000);
+    rx.setPipelineBufferSize(bufferMB << 20);
 
     if (!rx.start(cfg))
         return 1;

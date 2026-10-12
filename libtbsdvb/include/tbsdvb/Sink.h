@@ -32,6 +32,10 @@ public:
     virtual void writeBbFrame(const uint8_t *frame, size_t len, const BbHeader &hdr) = 0;
 };
 
+struct StreamStats;
+
+// Records to disk. Optionally splits into segments by size or time, keeps only the
+// newest N segments, and stops cleanly before the disk is full.
 class TBSDVB_API FileSink : public IOutputSink
 {
 public:
@@ -48,20 +52,38 @@ public:
     uint64_t bytesWritten() const { return m_bytes; }
     const std::string &fileName() const { return m_path; }
     const std::string &lastError() const { return m_error; }
+    uint32_t segments() const { return m_segment; }
+    bool stopped() const { return m_stopped; }
+    // Fills the file fields of StreamStats; also runs the periodic free-space check
+    void fillStats(StreamStats &st);
 
     // Final file name: default location, extension and optional timestamp suffix applied
     static std::string resolvePath(const FileOutputOptions &opt, CaptureMode mode);
+    // Name of segment n (1-based) when splitting is enabled
+    static std::string segmentPath(const std::string &base, uint32_t n);
 
 private:
     void write(const void *data, size_t len);
+    bool openSegment(std::string *error);
+    void maybeRotate();
+    void checkFreeSpace();
+    void stop(const std::string &reason);
 
     FileOutputOptions m_opt;
     CaptureMode m_mode;
     std::FILE *m_file = nullptr;
     std::vector<char> m_buffer;
-    std::string m_path;
+    std::string m_base;              // resolved name without segment index
+    std::string m_path;              // current file
+    std::vector<std::string> m_written; // segments of this recording, oldest first
     std::string m_error;
-    uint64_t m_bytes = 0;
+    uint64_t m_bytes = 0;            // total
+    uint64_t m_segmentBytes = 0;
+    int64_t m_segmentStartMs = 0;
+    int64_t m_lastSpaceCheckMs = 0;
+    int64_t m_freeBytes = -1;
+    uint32_t m_segment = 0;
+    bool m_stopped = false;
 };
 
 // Publishes data on a ZeroMQ PUB or PUSH socket.

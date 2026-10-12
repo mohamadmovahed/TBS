@@ -60,6 +60,27 @@ OutputPanel::OutputPanel(QWidget *parent)
     m_bbFormat->addItem(tr("Pseudo-TS as received"), static_cast<int>(BbFileFormat::PseudoTs));
     m_bbFormatLabel = keyLabel(tr("Format"));
     file->addRow(m_bbFormatLabel, m_bbFormat);
+    auto spin = [](int max, const QString &suffix, const QString &zero) {
+        auto *sp = new QSpinBox;
+        sp->setRange(0, max);
+        sp->setSuffix(suffix);
+        sp->setSpecialValueText(zero);
+        sp->setButtonSymbols(QAbstractSpinBox::NoButtons);
+        return sp;
+    };
+    auto *split = new QHBoxLayout;
+    m_splitSize = spin(1000000, tr(" MiB"), tr("no size limit"));
+    m_splitMinutes = spin(100000, tr(" min"), tr("no time limit"));
+    split->addWidget(m_splitSize, 1);
+    split->addWidget(keyLabel(tr("or")));
+    split->addWidget(m_splitMinutes, 1);
+    file->addRow(keyLabel(tr("New file every")), split);
+    m_keepFiles = spin(100000, tr(" files"), tr("keep all"));
+    m_keepFiles->setToolTip(tr("Rolling recording: delete the oldest files of this recording beyond this number"));
+    file->addRow(keyLabel(tr("Keep newest")), m_keepFiles);
+    m_minFree = spin(10000000, tr(" MiB"), tr("no check"));
+    m_minFree->setToolTip(tr("Stop recording cleanly when the free space on the disk drops below this"));
+    file->addRow(keyLabel(tr("Stop below")), m_minFree);
     root->addWidget(m_fileBox);
 
     connect(browse, &QPushButton::clicked, this, [this]() {
@@ -154,6 +175,8 @@ OutputPanel::OutputPanel(QWidget *parent)
     root->addStretch();
 
     connect(m_fileOn, &ToggleSwitch::toggled, this, &OutputPanel::updateEnabled);
+    connect(m_splitSize, qOverload<int>(&QSpinBox::valueChanged), this, &OutputPanel::updateEnabled);
+    connect(m_splitMinutes, qOverload<int>(&QSpinBox::valueChanged), this, &OutputPanel::updateEnabled);
     connect(m_zmqOn, &ToggleSwitch::toggled, this, &OutputPanel::updateEnabled);
     connect(m_video, &ToggleSwitch::toggled, this, &OutputPanel::videoPreviewToggled);
     updateEnabled();
@@ -165,6 +188,10 @@ void OutputPanel::setConfig(const tbs::ReceiverConfig &cfg, bool videoPreview)
     m_filePath->setText(QString::fromStdString(cfg.file.path));
     m_timestamp->setChecked(cfg.file.timestampSuffix);
     m_bbFormat->setCurrentIndex(m_bbFormat->findData(static_cast<int>(cfg.file.bbFormat)));
+    m_splitSize->setValue(static_cast<int>(cfg.file.splitSizeMB));
+    m_splitMinutes->setValue(cfg.file.splitMinutes);
+    m_keepFiles->setValue(cfg.file.keepFiles);
+    m_minFree->setValue(static_cast<int>(cfg.file.minFreeMB));
     m_zmqOn->setChecked(cfg.zmq.enabled && ZmqSink::available());
     m_endpoint->setText(QString::fromStdString(cfg.zmq.endpoint));
     m_socketType->setCurrentIndex(m_socketType->findData(static_cast<int>(cfg.zmq.socket)));
@@ -187,6 +214,10 @@ void OutputPanel::applyTo(tbs::ReceiverConfig &cfg) const
     cfg.file.path = m_filePath->text().trimmed().toStdString();
     cfg.file.timestampSuffix = m_timestamp->isChecked();
     cfg.file.bbFormat = static_cast<BbFileFormat>(m_bbFormat->currentData().toInt());
+    cfg.file.splitSizeMB = static_cast<uint64_t>(m_splitSize->value());
+    cfg.file.splitMinutes = m_splitMinutes->value();
+    cfg.file.keepFiles = m_keepFiles->value();
+    cfg.file.minFreeMB = static_cast<uint64_t>(m_minFree->value());
     cfg.zmq.enabled = m_zmqOn->isChecked() && ZmqSink::available();
     const QString ep = m_endpoint->text().trimmed();
     cfg.zmq.endpoint = ep.isEmpty() ? std::string("tcp://*:5555") : ep.toStdString();
@@ -252,5 +283,6 @@ void OutputPanel::updateEnabled()
     m_zmqBox->setEnabled(m_editable && m_zmqOn->isChecked());
     m_packetsPerMsg->setEnabled(m_mode == CaptureMode::TransportStream);
     m_pcapBox->setEnabled(m_editable && m_pcapOn->isChecked());
+    m_keepFiles->setEnabled(m_splitSize->value() > 0 || m_splitMinutes->value() > 0);
     m_pcapNonIp->setEnabled(m_pcapFraming->currentData().toBool());
 }
