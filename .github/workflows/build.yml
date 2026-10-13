@@ -12,9 +12,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-base-dev libzmq3-dev libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libswresample-dev qt6-multimedia-dev libsrt-gnutls-dev pkg-config
+          sudo apt-get install -y qt6-base-dev libzmq3-dev libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libswresample-dev qt6-multimedia-dev libsrt-gnutls-dev pkg-config \
+            pybind11-dev python3-dev
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE=$(which python3)
       - name: Build
         run: cmake --build build -j
       - name: Test
@@ -67,7 +68,7 @@ jobs:
         run: ctest --test-dir build-fuzz -R fuzz-regress --output-on-failure
       - name: Fuzz each target for 60 s
         run: |
-          for t in bbframes pseudots psi gse dvbtext capture; do
+          for t in bbframes pseudots psi gse dvbtext capture tsfilter; do
             mkdir -p work/$t && cp fuzz/corpus/$t/* work/$t/
             ./build-fuzz/fuzz/fuzz_$t -max_total_time=60 -max_len=65536 -artifact_prefix=crash-$t- work/$t
           done
@@ -121,3 +122,96 @@ jobs:
         run: cmake --build build --config Release
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+
+  # ---- Installers: uploaded as workflow artifacts; on a v* tag also attached to the release ----
+  package-linux:
+    permissions:
+      contents: write # attach the packages to a release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-base-dev libzmq3-dev libavformat-dev libavcodec-dev libswscale-dev libavutil-dev \
+            libswresample-dev qt6-multimedia-dev libsrt-gnutls-dev pkg-config pybind11-dev python3-dev dpkg-dev \
+            libfuse2t64 file
+      - name: DEB
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTBS_BUILD_TESTS=OFF -DPython_EXECUTABLE=$(which python3)
+          cmake --build build -j
+          (cd build && cpack -G DEB)
+      - name: AppImage
+        run: packaging/appimage/build-appimage.sh build-appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            build/*.deb
+            build-appimage/*.AppImage
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/*.deb
+            build-appimage/*.AppImage
+
+  package-windows:
+    permissions:
+      contents: write # attach the packages to a release
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.*'
+          modules: 'qtmultimedia'
+      - name: Install libraries (vcpkg)
+        run: vcpkg install zeromq:x64-windows "ffmpeg[avcodec,avformat,swscale,swresample]:x64-windows"
+      - name: Build
+        run: |
+          cmake -S . -B build -DTBS_BUILD_TESTS=OFF -DTBS_BUILD_PYTHON=OFF `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build --config Release
+      - name: Installer
+        run: cd build; cpack -G "NSIS;ZIP" -C Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            build/*.exe
+            build/*.zip
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/*-win64.exe
+            build/*-win64.zip
+
+  package-macos:
+    permissions:
+      contents: write # attach the packages to a release
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install qt zeromq ffmpeg srt pkg-config
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTBS_BUILD_TESTS=OFF -DTBS_BUILD_PYTHON=OFF \
+                -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
+          cmake --build build -j
+      - name: DMG
+        run: cd build && cpack -G DragNDrop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: build/*.dmg
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/*.dmg

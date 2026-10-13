@@ -4,11 +4,13 @@ pybind11_add_module(tbsdvb_python MODULE tbsdvb_py.cpp)
 set_target_properties(tbsdvb_python PROPERTIES OUTPUT_NAME tbsdvb LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/python)
 target_link_libraries(tbsdvb_python PRIVATE TbsDvb::tbsdvb TbsDvb::tbsbbproc)
 
+# Relative, so packages relocate: the Debian layout on Linux (on sys.path for the system Python
+# with the /usr prefix), site-packages of the build Python elsewhere
 if(NOT TBS_PYTHON_INSTALL_DIR)
-    if(Python_SITEARCH)
-        set(TBS_PYTHON_INSTALL_DIR ${Python_SITEARCH})
-    else()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         set(TBS_PYTHON_INSTALL_DIR lib/python3/dist-packages)
+    else()
+        set(TBS_PYTHON_INSTALL_DIR lib/python${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}/site-packages)
     endif()
 endif()
 install(TARGETS tbsdvb_python LIBRARY DESTINATION ${TBS_PYTHON_INSTALL_DIR})

@@ -125,3 +125,6 @@ message(STATUS "tbsdvb SRT    : ${TBSDVB_ENABLE_SRT}")
 if(TBS_BUILD_PYTHON)
     add_subdirectory(python)
 endif()
+
+# ---- Installers (cpack) ----
+include(Packaging)

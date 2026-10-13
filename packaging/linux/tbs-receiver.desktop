@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TBS Receiver
+GenericName=DVB-S2/S2X Receiver
+Comment=Tune TBS 6903x cards, capture TS or BBFrames, stream, analyse and monitor
+Exec=tbs-receiver
+Icon=tbs-receiver
+Terminal=false
+Categories=AudioVideo;Video;TV;Network;
+Keywords=DVB;satellite;BBFrame;GSE;transport stream;

@@ -26,6 +26,24 @@ Supported backends:
 
 </details>
 
+## Installing
+
+Installers are built by CI (the `package-*` jobs; attached to the GitHub release for `v*` tags):
+
+| Platform | Package | Contents |
+|---|---|---|
+| Debian / Ubuntu | `tbs-receiver_<version>_amd64.deb` (`sudo apt install ./tbs-receiver_*.deb`) | GUI with desktop entry, `tbs-daemon` (+ systemd unit and example config in `/usr/share/tbs-receiver`), command-line tools, libraries and headers, Python module |
+| Any Linux | `TBS_Receiver-<version>-x86_64.AppImage` | GUI and tools with Qt, FFmpeg, ZeroMQ and SRT bundled; `chmod +x` and run |
+| Windows | `tbs-receiver-<version>-win64.exe` (NSIS) or `.zip` | GUI with Qt and FFmpeg, tools, daemon; Start menu entry, optional PATH entry, uninstaller |
+| macOS | `tbs-receiver-<version>-Darwin.dmg` | TBS Receiver.app and the tools (file replay and analysis only: TBS has no macOS driver) |
+
+Building them yourself:
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+cd build && cpack -G DEB                 # Linux: also TGZ; Windows: NSIS/ZIP; macOS: DragNDrop
+packaging/appimage/build-appimage.sh     # downloads linuxdeploy + its Qt plugin
+```
+
 ## Building
 
 CMake ≥ 3.16 and a C++17 compiler are required. Everything else is optional and detected automatically:
@@ -36,6 +54,7 @@ CMake ≥ 3.16 and a C++17 compiler are required. Everything else is optional an
 | `TBS_BUILD_TOOLS` | ON | `tbs-cli`, `tbs-make-test-stream`, `tbs-c-example` |
 | `TBS_BUILD_TESTS` | ON | `ctest` unit and end-to-end tests |
 | `TBS_BUILD_DAEMON` | ON | `tbs-daemon` |
+| `TBS_BUILD_PYTHON` | ON | Python module `tbsdvb` (needs pybind11 and the Python development files) |
 | `TBS_ENABLE_FFMPEG` | ON | Video preview in the GUI; with Qt 6 Multimedia and libswresample also audio |
 | `TBSDVB_ENABLE_ZMQ` | ON | ZeroMQ sink in the library |
 | `TBSDVB_ENABLE_SRT` | ON | SRT network output (UDP and RTP need nothing extra) |
@@ -45,7 +64,7 @@ CMake ≥ 3.16 and a C++17 compiler are required. Everything else is optional an
 ```sh
 sudo apt install build-essential cmake pkg-config qt6-base-dev libzmq3-dev \
                  libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libswresample-dev \
-                 qt6-multimedia-dev libsrt-gnutls-dev
+                 qt6-multimedia-dev libsrt-gnutls-dev pybind11-dev python3-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j && ctest --test-dir build
 ./build/app/tbs-receiver
@@ -141,6 +160,29 @@ Other public pieces you can use on their own:
 - `TsFilter` cuts one service (SPTS with a rewritten PAT) or a PID list out of a transport stream.
 - `Monitor` keeps the receiver history and raises alarms (see [Monitoring and alarms](#monitoring-and-alarms)).
 - `FileSink`, `ZmqSink`, `TsNetworkSink`, or your own `IOutputSink` via `Receiver::addSink()`.
+
+**Python** (`import tbsdvb`, built when pybind11 is found; installed into `dist-packages`):
+```python
+import tbsdvb
+cfg = tbsdvb.ReceiverConfig()
+cfg.device.adapter = 0
+cfg.tuning.frequency_mhz, cfg.tuning.symbol_rate_ksps = 11494, 27500
+cfg.capture = tbsdvb.CaptureMode.BBFrame
+cfg.network.append(tbsdvb.TsNetworkOutput("udp://239.1.1.1:1234?program=101"))
+rx, proc, mon = tbsdvb.Receiver(), tbsdvb.Processor(), tbsdvb.Monitor()
+proc.open()
+rx.attach_processor(proc)                      # analysis in C++, no Python per packet
+rx.attach_monitor(mon)
+rx.on_bbframe = lambda frame, header: ...      # optional: raw data in Python (bytes, BbHeader)
+mon.set_alarm_callback(lambda e: print(e.type, e.raised, e.message))
+rx.start(cfg)
+...
+print(rx.status().cnr_db, proc.snapshot()["streams"][0]["ts"]["services"])
+open("epg.xml", "w").write(proc.xmltv())
+fmt, snapshot, xmltv = tbsdvb.analyze_capture("recording.ts")   # offline
+```
+Callbacks run on the capture threads with the GIL held; an exception in one is reported and the capture
+continues. `python/example.py` is a complete script.
 
 **Threads.** The receiver uses two threads, joined by a bounded buffer (128 MiB by default; set it
 with `setPipelineBufferSize`).

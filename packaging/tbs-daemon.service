@@ -13,7 +13,8 @@ User=tbs
 Group=tbs
 # /dev/dvb access
 SupplementaryGroups=video
-ExecStart=/usr/local/bin/tbs-daemon --config /etc/tbs-daemon/tbs-daemon.json
+# /usr/bin (package) or /usr/local/bin (make install)
+ExecStart=/usr/bin/env tbs-daemon --config /etc/tbs-daemon/tbs-daemon.json
 Restart=on-failure
 RestartSec=5
 # Recordings and the configuration written by PUT /api/v1/config
