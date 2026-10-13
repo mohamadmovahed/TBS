@@ -18,6 +18,8 @@ add_executable(tbs-receiver
     panels/ServicesPanel.cpp panels/ServicesPanel.h
     panels/IpPanel.cpp panels/IpPanel.h
     panels/EpgPanel.cpp panels/EpgPanel.h
+    panels/MonitorPanel.cpp panels/MonitorPanel.h
+    widgets/HistoryChart.cpp widgets/HistoryChart.h
     widgets/ShareBarDelegate.cpp widgets/ShareBarDelegate.h
     widgets/MetricTile.cpp widgets/MetricTile.h
     widgets/StatusPill.cpp widgets/StatusPill.h

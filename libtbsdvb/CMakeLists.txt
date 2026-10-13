@@ -23,6 +23,7 @@ set(TBSDVB_PUBLIC_HEADERS
     include/tbsdvb/DvbNames.h
     include/tbsdvb/Psi.h
     include/tbsdvb/TsFilter.h
+    include/tbsdvb/Monitor.h
 )
 
 set(TBSDVB_SOURCES
@@ -37,6 +38,7 @@ set(TBSDVB_SOURCES
     src/DvbNames.cpp
     src/Psi.cpp
     src/TsFilter.cpp
+    src/Monitor.cpp
     src/TsNetworkSink.cpp
     src/NetSocket.cpp
     src/NetSocket.h

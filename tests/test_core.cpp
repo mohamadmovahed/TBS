@@ -4,6 +4,7 @@
 #include "tbsdvb/BbFrameToTs.h"
 #include "tbsdvb/BbHeader.h"
 #include "tbsdvb/PlsUtil.h"
+#include "tbsdvb/Monitor.h"
 #include "tbsdvb/Psi.h"
 #include "tbsdvb/Status.h"
 #include "tbsdvb/TsAnalyzer.h"
@@ -20,6 +21,7 @@
 #include <cstdio>
 #include <cstring>
 #include <atomic>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <set>
@@ -828,6 +830,144 @@ static void testPreviewStream()
     std::remove(in.c_str());
 }
 
+static void testMonitor()
+{
+    MonitorConfig cfg;
+    cfg.historySeconds = 30;
+    cfg.noLockHoldSec = 3;
+    cfg.lowCnr = true;
+    cfg.cnrMinDb = 5.0;
+    cfg.cnrHoldSec = 2;
+    cfg.windowSec = 10;
+    const std::string marker = "tbs_test_alarm.txt";
+    std::remove(marker.c_str());
+#ifndef _WIN32
+    cfg.command = "echo {alarm} {state} {message} >> " + marker;
+#endif
+    Monitor m(cfg);
+    std::vector<AlarmEvent> events;
+    m.setAlarmCallback([&](const AlarmEvent &e) { events.push_back(e); });
+
+    FrontendStatus fe;
+    fe.valid = true;
+    fe.flags = FrontendStatus::HasLock;
+    fe.hasCnrDb = true;
+    fe.cnrDb = 9.0;
+    StreamStats st;
+    st.inputMbps = 10.0;
+    int64_t t = 1000000;
+    auto step = [&](int n = 1) {
+        for (int i = 0; i < n; ++i) {
+            t += 1000;
+            m.update(ReceiverState::Running, fe, st, t);
+        }
+    };
+    step(5);
+    CHECK_EQ(m.activeAlarms(), 0u);
+    CHECK(events.empty());
+
+    // Lock lost: raised after the hold time, cleared on relock
+    fe.flags = FrontendStatus::HasSignal;
+    step(2);
+    CHECK_EQ(m.activeAlarms(), 0u);
+    step(2);
+    CHECK_EQ(m.activeAlarms(), 1u);
+    CHECK(!events.empty() && events.back().type == AlarmType::NoLock && events.back().raised);
+    fe.flags = FrontendStatus::HasLock;
+    step();
+    CHECK_EQ(m.activeAlarms(), 0u);
+    CHECK(events.back().type == AlarmType::NoLock && !events.back().raised);
+
+    // Low C/N
+    fe.cnrDb = 3.5;
+    step(3);
+    CHECK(m.alarms()[static_cast<size_t>(AlarmType::LowCnr)].active);
+    CHECK(m.alarms()[static_cast<size_t>(AlarmType::LowCnr)].message.find("3.5 dB") != std::string::npos);
+    fe.cnrDb = 8.0;
+    step();
+    CHECK(!m.alarms()[static_cast<size_t>(AlarmType::LowCnr)].active);
+
+    // CC errors in the window: raised at once, cleared when they leave the window
+    st.ccErrors += 4;
+    step();
+    const Alarm cc = m.alarms()[static_cast<size_t>(AlarmType::CcErrors)];
+    CHECK(cc.active);
+    CHECK(cc.message.find("4 CC errors") != std::string::npos);
+    step(9);
+    CHECK(m.alarms()[static_cast<size_t>(AlarmType::CcErrors)].active);
+    step(2);
+    CHECK(!m.alarms()[static_cast<size_t>(AlarmType::CcErrors)].active);
+    CHECK_EQ(m.alarms()[static_cast<size_t>(AlarmType::CcErrors)].raisedCount, 1u);
+
+    // No data
+    st.inputMbps = 0.0;
+    step(6);
+    CHECK(m.alarms()[static_cast<size_t>(AlarmType::NoData)].active);
+    st.inputMbps = 10.0;
+    step();
+
+    // Output errors: stopped recording
+    st.fileStopped = true;
+    step();
+    CHECK(m.alarms()[static_cast<size_t>(AlarmType::OutputError)].active);
+    st.fileStopped = false;
+    step();
+    CHECK(!m.alarms()[static_cast<size_t>(AlarmType::OutputError)].active);
+
+    // History is trimmed to historySeconds; samples carry the per-interval counters
+    const auto h = m.history();
+    CHECK(h.size() <= 31u && h.size() >= 29u);
+    CHECK(h.back().timeMs == t);
+    size_t ccTotal = 0;
+    for (const auto &s2 : m.history(0))
+        ccTotal += s2.ccErrors;
+    CHECK(ccTotal == 4u || h.front().timeMs > t - 30000);
+
+    // A counter that goes back (new capture) counts as fresh errors, not a huge delta
+    st.ccErrors = 1;
+    step();
+    CHECK_EQ(m.history().back().ccErrors, 1u);
+
+    // CSV
+    const std::string csv = "tbs_test_monitor.csv";
+    std::string err;
+    CHECK(m.writeCsv(csv, t - 5000, &err));
+    std::ifstream in(csv);
+    std::string line;
+    int lines = 0;
+    std::getline(in, line);
+    CHECK(line.rfind("time,unix_ms,running,locked", 0) == 0);
+    while (std::getline(in, line))
+        ++lines;
+    CHECK_EQ(lines, 6);
+    in.close();
+    std::remove(csv.c_str());
+
+    // Disabled alarms never fire; reset clears active ones
+    cfg.noLock = false;
+    m.setConfig(cfg);
+    fe.flags = 0;
+    step(5);
+    CHECK(!m.alarms()[static_cast<size_t>(AlarmType::NoLock)].active);
+    st.ccErrors += 10;
+    step();
+    CHECK(m.activeAlarms() > 0);
+    m.reset();
+    CHECK_EQ(m.activeAlarms(), 0u);
+    CHECK(std::string(alarmTypeName(AlarmType::BbCrcErrors)) == "bbframe-crc");
+
+#ifndef _WIN32
+    // The command ran for each raise/clear (detached threads, any order), with shell quoting
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::ifstream mk(marker);
+    const std::string all((std::istreambuf_iterator<char>(mk)), std::istreambuf_iterator<char>());
+    CHECK(all.find("no-lock raised no lock for 3 s\n") != std::string::npos);
+    CHECK(all.find("low-cnr cleared C/N back above the limit\n") != std::string::npos);
+    mk.close();
+    std::remove(marker.c_str());
+#endif
+}
+
 #if defined(TBS_TEST_LINUX_INTERNALS)
 #include "platform/LinuxDvbDevice.h"
 
@@ -1005,6 +1145,7 @@ int main()
     testUdpRtpOutput();
     testReceiverNetworkOutput();
     testPreviewStream();
+    testMonitor();
 #if defined(TBS_TEST_LINUX_INTERNALS)
     testLinuxDiagnostics();
 #endif

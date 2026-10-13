@@ -186,4 +186,61 @@ void saveProcessing(QSettings &s, const tbs::bb::ProcessorConfig &c)
     s.endGroup();
 }
 
+tbs::MonitorConfig loadMonitor(QSettings &s)
+{
+    const tbs::MonitorConfig d;
+    tbs::MonitorConfig c;
+    s.beginGroup(QStringLiteral("monitor"));
+    c.noLock = read(s, "noLock", d.noLock);
+    c.noLockHoldSec = read(s, "noLockHoldSec", d.noLockHoldSec);
+    c.lowCnr = read(s, "lowCnr", d.lowCnr);
+    c.cnrMinDb = read(s, "cnrMinDb", d.cnrMinDb);
+    c.cnrHoldSec = read(s, "cnrHoldSec", d.cnrHoldSec);
+    c.lowLevel = read(s, "lowLevel", d.lowLevel);
+    c.levelMinDbm = read(s, "levelMinDbm", d.levelMinDbm);
+    c.levelHoldSec = read(s, "levelHoldSec", d.levelHoldSec);
+    c.ccErrors = read(s, "ccErrors", d.ccErrors);
+    c.ccMaxPerWindow = read(s, "ccMaxPerWindow", d.ccMaxPerWindow);
+    c.bbCrcErrors = read(s, "bbCrcErrors", d.bbCrcErrors);
+    c.bbCrcMaxPerWindow = read(s, "bbCrcMaxPerWindow", d.bbCrcMaxPerWindow);
+    c.windowSec = read(s, "windowSec", d.windowSec);
+    c.lowBitrate = read(s, "lowBitrate", d.lowBitrate);
+    c.bitrateMinMbps = read(s, "bitrateMinMbps", d.bitrateMinMbps);
+    c.bitrateHoldSec = read(s, "bitrateHoldSec", d.bitrateHoldSec);
+    c.noData = read(s, "noData", d.noData);
+    c.noDataHoldSec = read(s, "noDataHoldSec", d.noDataHoldSec);
+    c.drops = read(s, "drops", d.drops);
+    c.outputErrors = read(s, "outputErrors", d.outputErrors);
+    c.command = readString(s, "command", d.command);
+    s.endGroup();
+    return c;
+}
+
+void saveMonitor(QSettings &s, const tbs::MonitorConfig &c)
+{
+    s.beginGroup(QStringLiteral("monitor"));
+    s.setValue(QStringLiteral("noLock"), c.noLock);
+    s.setValue(QStringLiteral("noLockHoldSec"), c.noLockHoldSec);
+    s.setValue(QStringLiteral("lowCnr"), c.lowCnr);
+    s.setValue(QStringLiteral("cnrMinDb"), c.cnrMinDb);
+    s.setValue(QStringLiteral("cnrHoldSec"), c.cnrHoldSec);
+    s.setValue(QStringLiteral("lowLevel"), c.lowLevel);
+    s.setValue(QStringLiteral("levelMinDbm"), c.levelMinDbm);
+    s.setValue(QStringLiteral("levelHoldSec"), c.levelHoldSec);
+    s.setValue(QStringLiteral("ccErrors"), c.ccErrors);
+    s.setValue(QStringLiteral("ccMaxPerWindow"), c.ccMaxPerWindow);
+    s.setValue(QStringLiteral("bbCrcErrors"), c.bbCrcErrors);
+    s.setValue(QStringLiteral("bbCrcMaxPerWindow"), c.bbCrcMaxPerWindow);
+    s.setValue(QStringLiteral("windowSec"), c.windowSec);
+    s.setValue(QStringLiteral("lowBitrate"), c.lowBitrate);
+    s.setValue(QStringLiteral("bitrateMinMbps"), c.bitrateMinMbps);
+    s.setValue(QStringLiteral("bitrateHoldSec"), c.bitrateHoldSec);
+    s.setValue(QStringLiteral("noData"), c.noData);
+    s.setValue(QStringLiteral("noDataHoldSec"), c.noDataHoldSec);
+    s.setValue(QStringLiteral("drops"), c.drops);
+    s.setValue(QStringLiteral("outputErrors"), c.outputErrors);
+    writeString(s, "command", c.command);
+    s.endGroup();
+}
+
 } // namespace SettingsStore

@@ -6,6 +6,7 @@
 #include "BbHeader.h"
 #include "Device.h"
 #include "DvbNames.h"
+#include "Monitor.h"
 #include "PlsUtil.h"
 #include "Psi.h"
 #include "Receiver.h"

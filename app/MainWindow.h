@@ -2,10 +2,15 @@
 
 #include "ReceiverController.h"
 
+#include <tbsdvb/Monitor.h>
+
+#include <memory>
+
 #include <QMainWindow>
 #include <QMap>
 
 class EpgPanel;
+class MonitorPanel;
 class IpPanel;
 class LockChain;
 class QTimer;
@@ -121,6 +126,10 @@ private:
     QWidget *m_logTab = nullptr;
     ServicesPanel *m_services = nullptr;
     EpgPanel *m_epg = nullptr;
+    MonitorPanel *m_monitorPanel = nullptr;
+    std::unique_ptr<tbs::Monitor> m_monitor;
+    tbs::FrontendStatus m_lastStatus;
+    void updateAlarmIndicator();
     struct EpgState
     {
         uint64_t version = 0;

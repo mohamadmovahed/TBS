@@ -5,6 +5,7 @@
 #include "panels/EpgPanel.h"
 #include "panels/FormHelpers.h"
 #include "panels/IpPanel.h"
+#include "panels/MonitorPanel.h"
 #include "panels/OutputPanel.h"
 #include "panels/OverviewPanel.h"
 #include "panels/PidTable.h"
@@ -89,6 +90,10 @@ MainWindow::MainWindow(QWidget *parent)
 {
     setWindowTitle(tr("TBS Receiver"));
     m_controller = new ReceiverController(this);
+    {
+        QSettings settings;
+        m_monitor = std::make_unique<tbs::Monitor>(SettingsStore::loadMonitor(settings));
+    }
 #ifdef TBS_HAVE_FFMPEG
     m_decoder = new VideoDecoder(this);
     VideoDecoder *dec = m_decoder;
@@ -118,6 +123,24 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_controller, &ReceiverController::statusUpdated, this, &MainWindow::onStatus);
     connect(m_controller, &ReceiverController::statsUpdated, this, &MainWindow::onStats);
     connect(m_controller, &ReceiverController::logMessage, this, &MainWindow::appendLog);
+    // Alarms arrive on the GUI thread (onStats); they go to the log as well
+    m_monitor->setAlarmCallback([this](const tbs::AlarmEvent &e) {
+        const QString title = tr(tbs::alarmTypeTitle(e.type));
+        const QString msg = QString::fromStdString(e.message);
+        QMetaObject::invokeMethod(this, [this, raised = e.raised, title, msg]() {
+            appendLog(raised ? QStringLiteral("WARNING: alarm: %1 (%2)").arg(title, msg)
+                             : tr("Alarm cleared: %1 (%2)").arg(title, msg));
+            updateAlarmIndicator();
+        }, Qt::QueuedConnection);
+    });
+    connect(m_monitorPanel, &MonitorPanel::configChanged, this, [](const tbs::MonitorConfig &cfg) {
+        QSettings settings;
+        SettingsStore::saveMonitor(settings, cfg);
+    });
+    connect(m_tabs, &QTabWidget::currentChanged, this, [this]() {
+        if (m_tabs->currentWidget() == m_monitorPanel)
+            m_monitorPanel->refresh();
+    });
     connect(m_epg, &EpgPanel::watchRequested, this, [this](int isi, int program, int audio) {
         selectPreview(isi, program, audio);
     });
@@ -418,6 +441,8 @@ QWidget *MainWindow::buildMain()
     tabs->addTab(m_services, tr("Services"));
     m_epg = new EpgPanel;
     tabs->addTab(m_epg, tr("EPG"));
+    m_monitorPanel = new MonitorPanel(m_monitor.get());
+    tabs->addTab(m_monitorPanel, tr("Monitor"));
     tabs->addTab(scrollWrap(m_ip), tr("IP / GSE"));
     tabs->addTab(wrapCard(m_pids), tr("PIDs"));
     m_logTab = wrapCard(m_log);
@@ -528,6 +553,8 @@ void MainWindow::startCapture()
     }
     m_controller->setProcessor(m_processor);
     m_services->reset();
+    m_monitor->reset();
+    m_lastStatus = tbs::FrontendStatus();
     m_epg->reset();
     m_epgState.clear();
     m_ip->reset();
@@ -682,6 +709,7 @@ void MainWindow::onStatus(const tbs::FrontendStatus &st)
 {
     if (!m_running)
         return;
+    m_lastStatus = st;
     m_chain->setFlags(st.flags);
     m_pill->setState(st.locked() ? StatusPill::Kind::Good : StatusPill::Kind::Warning,
                      st.locked() ? tr("LOCKED") : tr("SEARCHING"));
@@ -752,6 +780,18 @@ void MainWindow::onStats(const tbs::StreamStats &st)
     m_overview->updateStats(st);
     m_pids->updateStats(st);
     m_output->setNetworkStatus(st.network);
+
+    m_monitor->update(tbs::ReceiverState::Running, m_lastStatus, st);
+    if (m_tabs->currentWidget() == m_monitorPanel)
+        m_monitorPanel->refresh();
+    updateAlarmIndicator();
+}
+
+void MainWindow::updateAlarmIndicator()
+{
+    const size_t n = m_monitor->activeAlarms();
+    const int idx = m_tabs->indexOf(m_monitorPanel);
+    m_tabs->setTabText(idx, n ? tr("Monitor (%1)").arg(n) : tr("Monitor"));
 }
 
 void MainWindow::appendLog(const QString &message)
@@ -777,7 +817,8 @@ void MainWindow::showSidebar(const QString &name)
 void MainWindow::showTab(const QString &name)
 {
     static const QStringList names = {QStringLiteral("overview"), QStringLiteral("services"), QStringLiteral("epg"),
-                                      QStringLiteral("ip"), QStringLiteral("pids"), QStringLiteral("log")};
+                                      QStringLiteral("monitor"), QStringLiteral("ip"), QStringLiteral("pids"),
+                                      QStringLiteral("log")};
     const int i = names.indexOf(name.toLower());
     if (i >= 0)
         m_tabs->setCurrentIndex(i);
