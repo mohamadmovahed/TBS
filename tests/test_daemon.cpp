@@ -37,7 +37,9 @@ static void testJson()
 {
     json::Value v;
     std::string err;
-    CHECK(json::parse(R"({"a": [1, 2.5, -3e2, true, null, "x\"yé😀"], "b": {"c": {}}})", &v, &err));
+    // Not inside CHECK: MSVC cannot stringize a raw string literal that contains \"
+    const char *text = R"({"a": [1, 2.5, -3e2, true, null, "x\"yé😀"], "b": {"c": {}}})";
+    CHECK(json::parse(text, &v, &err));
     CHECK(v.get("a").size() == 6);
     CHECK(v.get("a")[1].toNumber() == 2.5);
     CHECK(v.get("a")[2].toNumber() == -300);
