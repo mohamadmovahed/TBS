@@ -83,6 +83,17 @@ tbs::ReceiverConfig load(QSettings &s)
     c.zmq.tsPacketsPerMessage = read(s, "zmqTsPacketsPerMessage", d.zmq.tsPacketsPerMessage);
     c.zmq.sendHwm = read(s, "zmqSendHwm", d.zmq.sendHwm);
     s.endGroup();
+
+    // Network outputs as URLs; a leading '-' marks a disabled one
+    const QStringList urls = s.value(QStringLiteral("network/outputs")).toStringList();
+    for (const QString &u : urls) {
+        tbs::TsNetworkOutput o;
+        const bool off = u.startsWith(QLatin1Char('-'));
+        if (tbs::parseNetworkUrl((off ? u.mid(1) : u).toStdString(), &o)) {
+            o.enabled = !off;
+            c.network.push_back(o);
+        }
+    }
     return c;
 }
 
@@ -135,6 +146,11 @@ void save(QSettings &s, const tbs::ReceiverConfig &c)
     s.setValue(QStringLiteral("zmqTsPacketsPerMessage"), c.zmq.tsPacketsPerMessage);
     s.setValue(QStringLiteral("zmqSendHwm"), c.zmq.sendHwm);
     s.endGroup();
+
+    QStringList urls;
+    for (const tbs::TsNetworkOutput &o : c.network)
+        urls << (o.enabled ? QString() : QStringLiteral("-")) + QString::fromStdString(tbs::networkUrl(o));
+    s.setValue(QStringLiteral("network/outputs"), urls);
 }
 
 tbs::bb::ProcessorConfig loadProcessing(QSettings &s)

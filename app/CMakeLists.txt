@@ -12,6 +12,7 @@ add_executable(tbs-receiver
     panels/FormHelpers.h
     panels/TuningPanel.cpp panels/TuningPanel.h
     panels/OutputPanel.cpp panels/OutputPanel.h
+    panels/NetOutputDialog.cpp panels/NetOutputDialog.h
     panels/OverviewPanel.cpp panels/OverviewPanel.h
     panels/PidTable.cpp panels/PidTable.h
     panels/ServicesPanel.cpp panels/ServicesPanel.h

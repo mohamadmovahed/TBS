@@ -2,6 +2,7 @@
 
 option(TBSDVB_BUILD_SHARED "Build tbsdvb as a shared library" OFF)
 option(TBSDVB_ENABLE_ZMQ "ZeroMQ output sink (needs libzmq)" ON)
+option(TBSDVB_ENABLE_SRT "SRT network output (needs libsrt)" ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -20,6 +21,8 @@ set(TBSDVB_PUBLIC_HEADERS
     include/tbsdvb/TsAnalyzer.h
     include/tbsdvb/PlsUtil.h
     include/tbsdvb/DvbNames.h
+    include/tbsdvb/Psi.h
+    include/tbsdvb/TsFilter.h
 )
 
 set(TBSDVB_SOURCES
@@ -32,6 +35,11 @@ set(TBSDVB_SOURCES
     src/TsAnalyzer.cpp
     src/PlsUtil.cpp
     src/DvbNames.cpp
+    src/Psi.cpp
+    src/TsFilter.cpp
+    src/TsNetworkSink.cpp
+    src/NetSocket.cpp
+    src/NetSocket.h
     src/Devices.cpp
     src/FileReplayDevice.cpp
     src/FileReplayDevice.h
@@ -70,7 +78,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 elseif(WIN32)
     target_sources(tbsdvb PRIVATE src/platform/WinBdaDevice.cpp src/platform/WinBdaDevice.h)
     target_compile_definitions(tbsdvb PRIVATE TBSDVB_HAVE_WIN_BDA=1 WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_link_libraries(tbsdvb PRIVATE strmiids ole32 oleaut32 uuid)
+    target_link_libraries(tbsdvb PRIVATE strmiids ole32 oleaut32 uuid ws2_32)
 endif()
 
 if(TBSDVB_ENABLE_ZMQ)
@@ -84,6 +92,18 @@ if(TBSDVB_ENABLE_ZMQ)
     endif()
 endif()
 set(TBSDVB_ENABLE_ZMQ ${TBSDVB_ENABLE_ZMQ} PARENT_SCOPE)
+
+if(TBSDVB_ENABLE_SRT)
+    include(FindSrtLib)
+    if(TARGET tbs::srt)
+        target_link_libraries(tbsdvb PRIVATE tbs::srt)
+        target_compile_definitions(tbsdvb PRIVATE TBSDVB_HAVE_SRT=1)
+    else()
+        message(STATUS "libsrt not found - SRT output disabled (UDP/RTP still available)")
+        set(TBSDVB_ENABLE_SRT OFF)
+    endif()
+endif()
+set(TBSDVB_ENABLE_SRT ${TBSDVB_ENABLE_SRT} PARENT_SCOPE)
 
 if(MSVC)
     target_compile_options(tbsdvb PRIVATE /W4 /wd4251 /permissive-)
@@ -107,6 +127,7 @@ configure_package_config_file(cmake/TbsDvbConfig.cmake.in
 write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/TbsDvbConfigVersion.cmake
     COMPATIBILITY SameMajorVersion)
 install(FILES
+    cmake/FindSrtLib.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/TbsDvbConfig.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/TbsDvbConfigVersion.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/TbsDvb)

@@ -168,6 +168,7 @@ void Receiver::Impl::run(ReceiverConfig cfg)
     std::vector<std::shared_ptr<IOutputSink>> sinks;
     std::shared_ptr<FileSink> fileSink;
     std::shared_ptr<ZmqSink> zmqSink;
+    std::vector<std::shared_ptr<TsNetworkSink>> netSinks;
     const bool bbMode = cfg.capture == CaptureMode::BBFrame;
 
     auto finish = [&](const std::string &error) {
@@ -219,6 +220,21 @@ void Receiver::Impl::run(ReceiverConfig cfg)
         log(std::string("ZeroMQ ") + (cfg.zmq.socket == ZmqSocketKind::Pub ? "PUB " : "PUSH ")
             + (cfg.zmq.bind ? "bound to " : "connected to ") + cfg.zmq.endpoint);
         sinks.push_back(zmqSink);
+    }
+    for (const TsNetworkOutput &o : cfg.network) {
+        if (!o.enabled)
+            continue;
+        auto ns = std::make_shared<TsNetworkSink>(o, cfg.capture);
+        if (!ns->open(&err))
+            return finish(err);
+        std::string what = o.programNumber > 0 ? util::format("service %d", o.programNumber)
+                           : o.pids.empty()    ? std::string("the transport stream")
+                                               : util::format("%u PIDs", static_cast<unsigned>(o.pids.size()));
+        if (bbMode)
+            what += o.isi >= 0 ? util::format(" of ISI %d", o.isi) : std::string(" of the first TS input stream");
+        log("Streaming " + what + " to " + networkUrl(o, true));
+        netSinks.push_back(ns);
+        sinks.push_back(ns);
     }
     for (auto &s : extraSinks) {
         if (!s->open(&err))
@@ -289,6 +305,7 @@ void Receiver::Impl::run(ReceiverConfig cfg)
         uint64_t lastFrames = 0;
         uint64_t lastPayload = 0;
         uint64_t lastDropped = 0;
+        std::vector<uint64_t> lastNetBytes(netSinks.size(), 0);
         bool warnedNoBb = false;
         bool fileErrorReported = false;
 
@@ -338,6 +355,12 @@ void Receiver::Impl::run(ReceiverConfig cfg)
             if (zmqSink) {
                 st.zmqMessages = zmqSink->messages();
                 st.zmqDropped = zmqSink->dropped();
+            }
+            for (size_t i = 0; i < netSinks.size(); ++i) {
+                NetOutputStatus ns = netSinks[i]->status();
+                ns.mbps = (ns.bytes - lastNetBytes[i]) * 8.0 / dt / 1e6;
+                lastNetBytes[i] = ns.bytes;
+                st.network.push_back(std::move(ns));
             }
             {
                 std::lock_guard<std::mutex> lock(mutex);

@@ -163,6 +163,44 @@ int main(int argc, char **argv)
         save(root / "psi", "tables", out);
     }
 
+    // fuzz_tsfilter: program(2) flags(1) | selector(1) len(2) bytes
+    {
+        Bytes out;
+        builders::put16(out, 1); // service 1
+        out.push_back(0);
+        auto addSection = [&out](uint8_t sel, const Bytes &sec) {
+            const size_t n = sec.size() - 4;
+            out.push_back(sel);
+            builders::put16(out, static_cast<uint16_t>(n));
+            out.insert(out.end(), sec.begin(), sec.begin() + static_cast<std::ptrdiff_t>(n));
+        };
+        Bytes pat;
+        builders::put16(pat, 1);
+        builders::put16(pat, 0xE100);
+        builders::put16(pat, 2);
+        builders::put16(pat, 0xE200);
+        Bytes pmt;
+        builders::put16(pmt, 0xE101);
+        builders::put16(pmt, 0xF000);
+        pmt.push_back(0x1B);
+        builders::put16(pmt, 0xE101);
+        builders::put16(pmt, 0xF000);
+        pmt.push_back(0x0F);
+        builders::put16(pmt, 0xE102);
+        builders::put16(pmt, 0xF006);
+        builders::addDescriptor(pmt, 0x09, {0x0B, 0x00, 0xE1, 0x03});
+        for (int r = 0; r < 3; ++r) {
+            addSection(0x00, builders::makeSection(0x00, 0x42, static_cast<uint8_t>(r), pat));
+            addSection(0x01, builders::makeSection(0x02, 1, 0, pmt));
+            for (uint8_t sel : {0x83, 0x84, 0x85, 0x87}) {
+                out.push_back(sel);
+                builders::put16(out, 188);
+                out.insert(out.end(), 188, static_cast<uint8_t>(sel));
+            }
+        }
+        save(root / "tsfilter", "service", out);
+    }
+
     // fuzz_gse: flags(1) syncd(2) len(2) data field
     auto gseRecords = [](const std::vector<Bytes> &frames, uint8_t flags) {
         Bytes out;

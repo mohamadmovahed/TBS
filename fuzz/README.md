@@ -11,6 +11,7 @@ must survive any input. Six libFuzzer targets cover them:
 | `fuzz_gse` | GSE decapsulation (normal/HEM), extension headers, IP statistics, pcap writer |
 | `fuzz_dvbtext` | DVB text decoding |
 | `fuzz_capture` | Capture-file format detection and BBFrame resynchronisation |
+| `fuzz_tsfilter` | Service / PID filter of the network output: PAT/PMT following and PAT rewrite |
 
 The BBHeader CRC-8 and the section CRC-32 are filled in by the harnesses, so random
 input reaches the deep parsers instead of failing the checksum.

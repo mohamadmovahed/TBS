@@ -49,6 +49,10 @@ void usage(const char *argv0)
         "                              new file every MIB / MIN, keep newest N, stop below MIB free\n"
         "  --buffer MIB                capture -> processing buffer (default 128)\n"
         "  --zmq ENDPOINT [--push] [--connect] [--topic T] [--header] [--packets N]\n"
+        "  --net URL                   stream the TS over the network (repeatable):\n"
+        "                                udp://239.1.1.1:1234  rtp://host:5004  srt://host:9000  srt://:9000?mode=listener\n"
+        "                                options: ?program=N  pids=0x100,0x101  isi=N  ttl=N  iface=eth1|ADDR  pkts=1..7\n"
+        "                                         null=1  latency=MS  passphrase=..  streamid=..\n"
         "  --analyze                   analyse the content (TS tables, GSE/IP) and print a report at the end\n"
         "  --pcap FILE [--pcap-raw] [--pcapng]\n"
         "                              write IP packets from GSE (BBFrame mode) or MPE (TS) to a pcap file\n"
@@ -210,6 +214,14 @@ int main(int argc, char **argv)
             cfg.zmq.metadataHeader = true;
         } else if (a == "--packets") {
             cfg.zmq.tsPacketsPerMessage = std::stoi(next());
+        } else if (a == "--net") {
+            tbs::TsNetworkOutput o;
+            std::string err;
+            if (!tbs::parseNetworkUrl(next(), &o, &err)) {
+                std::fprintf(stderr, "--net: %s\n", err.c_str());
+                return 2;
+            }
+            cfg.network.push_back(o);
         } else if (a == "--analyze") {
             analyze = true;
         } else if (a == "--pcap") {
@@ -272,6 +284,8 @@ int main(int argc, char **argv)
                      static_cast<unsigned long long>(s.bbFrames), static_cast<unsigned long long>(s.bbCrcErrors),
                      static_cast<unsigned long long>(s.pipelineCapacityBytes ? 100 * s.pipelineQueuedBytes / s.pipelineCapacityBytes : 0),
                      s.pipelineDroppedBytes ? " DROPPING" : "");
+        for (const tbs::NetOutputStatus &n : s.network)
+            std::fprintf(stderr, " NET %.2f Mbit/s%s", n.mbps, n.active ? "" : (" (" + n.state + ")").c_str());
     };
     std::shared_ptr<tbs::bb::Processor> proc;
     if (analyze) {
@@ -303,6 +317,10 @@ int main(int argc, char **argv)
     }
     rx.stop();
     std::fprintf(stderr, "\n");
+    for (const tbs::NetOutputStatus &n : rx.stats().network)
+        std::fprintf(stderr, "%s: %llu TS packets, %llu bytes, %llu send errors, %s\n", n.url.c_str(),
+                     static_cast<unsigned long long>(n.packets), static_cast<unsigned long long>(n.bytes),
+                     static_cast<unsigned long long>(n.sendErrors), n.state.c_str());
     if (proc) {
         proc->close();
         std::printf("%s", tbs::bb::formatReport(proc->snapshot()).c_str());

@@ -21,6 +21,9 @@ int main(int argc, char *argv[])
     const QCommandLineOption theme(QStringLiteral("theme"), QStringLiteral("dark or light"), QStringLiteral("theme"));
     const QCommandLineOption tab(QStringLiteral("tab"), QStringLiteral("Initial details tab: overview, services, ip, pids, log"),
                                  QStringLiteral("name"));
+    const QCommandLineOption sidebar(QStringLiteral("sidebar"), QStringLiteral("Initial sidebar page: tuning or outputs"),
+                                     QStringLiteral("page"));
+    parser.addOption(sidebar);
     parser.addOption(autostart);
     parser.addOption(tab);
     parser.addOption(theme);
@@ -36,6 +39,8 @@ int main(int argc, char *argv[])
     w.show();
     if (parser.isSet(tab))
         w.showTab(parser.value(tab));
+    if (parser.isSet(sidebar))
+        w.showSidebar(parser.value(sidebar));
     if (parser.isSet(autostart))
         QTimer::singleShot(0, &w, &MainWindow::startCapture);
     return app.exec();

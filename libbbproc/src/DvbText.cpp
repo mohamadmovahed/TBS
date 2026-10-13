@@ -1,5 +1,7 @@
 #include "tbsbbproc/DvbText.h"
 
+#include <tbsdvb/Psi.h>
+
 namespace tbs {
 namespace bb {
 
@@ -184,20 +186,7 @@ std::string dvbTextToUtf8(const uint8_t *p, size_t len)
 
 uint32_t crc32Mpeg(const uint8_t *p, size_t len, uint32_t crc)
 {
-    static uint32_t table[256];
-    static bool init = [] {
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t c = i << 24;
-            for (int b = 0; b < 8; ++b)
-                c = (c & 0x80000000u) ? (c << 1) ^ 0x04C11DB7u : (c << 1);
-            table[i] = c;
-        }
-        return true;
-    }();
-    (void)init;
-    for (size_t i = 0; i < len; ++i)
-        crc = (crc << 8) ^ table[((crc >> 24) ^ p[i]) & 0xFF];
-    return crc;
+    return tbs::crc32Mpeg(p, len, crc);
 }
 
 } // namespace bb

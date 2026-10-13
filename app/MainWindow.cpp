@@ -619,6 +619,7 @@ void MainWindow::onStats(const tbs::StreamStats &st)
 
     m_overview->updateStats(st);
     m_pids->updateStats(st);
+    m_output->setNetworkStatus(st.network);
 }
 
 void MainWindow::appendLog(const QString &message)
@@ -632,6 +633,13 @@ void MainWindow::appendLog(const QString &message)
     m_log->appendHtml(QStringLiteral("<span style='color:%1'>%2</span>&nbsp;&nbsp;%3<span style='color:%4'>%5</span>")
                           .arg(t.muted.name(), QTime::currentTime().toString(QStringLiteral("HH:mm:ss.zzz")), marker,
                                t.ink.name(), message.toHtmlEscaped()));
+}
+
+void MainWindow::showSidebar(const QString &name)
+{
+    const bool outputs = name.compare(QLatin1String("outputs"), Qt::CaseInsensitive) == 0;
+    (outputs ? m_outputTab : m_tuningTab)->setChecked(true);
+    m_stack->setCurrentIndex(outputs ? 1 : 0);
 }
 
 void MainWindow::showTab(const QString &name)
@@ -655,6 +663,24 @@ void MainWindow::refreshProcessing()
     for (const auto &st : snap.streams)
         if (st.content == tbs::bb::StreamContent::TsInput)
             m_pids->setPidUsage(st.ts.pidUsage);
+
+    // Services offered for network outputs
+    QVector<ServiceChoice> services;
+    for (const auto &st : snap.streams) {
+        for (const auto &p : st.ts.programs) {
+            if (p.programNumber == 0)
+                continue;
+            ServiceChoice c;
+            c.programNumber = p.programNumber;
+            c.isi = st.isi;
+            for (const auto &sv : st.ts.services)
+                if (sv.actual && sv.serviceId == p.programNumber)
+                    c.name = QString::fromStdString(sv.name);
+            services.push_back(c);
+        }
+    }
+    if (!services.isEmpty())
+        m_output->setServices(services);
 }
 
 void MainWindow::runDiagnostics()

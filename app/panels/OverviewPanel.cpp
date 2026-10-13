@@ -71,6 +71,8 @@ OverviewPanel::OverviewPanel(QWidget *parent)
     m_file = addRow(g, tr("File"));
     m_file->setWordWrap(true);
     m_zmq = addRow(g, tr("ZeroMQ"));
+    m_net = addRow(g, tr("Network"));
+    m_net->setWordWrap(true);
 
     grid->addWidget(demod, 0, 0);
     grid->addWidget(transport, 0, 1);
@@ -212,4 +214,21 @@ void OverviewPanel::updateStats(const StreamStats &st)
                             .arg(qs(st.fileName).toHtmlEscaped(), Theme::tokens().muted.name(), details));
     }
     m_zmq->setText(tr("%1 messages · %2 dropped").arg(count(st.zmqMessages), errors(st.zmqDropped)));
+    if (st.network.empty()) {
+        m_net->setText(tr("off"));
+    } else {
+        QStringList lines;
+        for (const tbs::NetOutputStatus &n : st.network) {
+            QString url = qs(n.url);
+            const int q = url.indexOf(QLatin1Char('?'));
+            if (q > 0)
+                url = url.left(q);
+            QString line = url.toHtmlEscaped() + QStringLiteral(" · ");
+            line += n.active ? tr("%1 Mbit/s").arg(n.mbps, 0, 'f', 2) : qs(n.state).toHtmlEscaped();
+            if (n.sendErrors)
+                line += tr(" · %1 dropped").arg(errors(n.sendErrors));
+            lines << line;
+        }
+        m_net->setText(lines.join(QStringLiteral("<br>")));
+    }
 }

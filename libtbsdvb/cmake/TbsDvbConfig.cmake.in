@@ -15,5 +15,10 @@ if(NOT "@TBSDVB_BUILD_SHARED@" AND "@TBSDVB_ENABLE_ZMQ@")
     endif()
 endif()
 
+# Same for libsrt (pkg-config, then a plain library search)
+if(NOT "@TBSDVB_BUILD_SHARED@" AND "@TBSDVB_ENABLE_SRT@")
+    include("${CMAKE_CURRENT_LIST_DIR}/FindSrtLib.cmake")
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/TbsDvbTargets.cmake")
 check_required_components(TbsDvb)

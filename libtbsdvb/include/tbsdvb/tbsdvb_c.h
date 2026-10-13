@@ -71,6 +71,10 @@ typedef struct tbs_config
     uint64_t file_min_free_mb;
     /* capture -> processing buffer in MiB (0 = default 128) */
     uint32_t pipeline_buffer_mb;
+
+    /* Up to 4 TS network outputs as URLs, empty = unused, e.g.
+       "udp://239.1.1.1:1234?program=101", "rtp://host:5004", "srt://:9000?mode=listener" */
+    char network_urls[4][1024];
 } tbs_config;
 
 typedef struct tbs_status
@@ -107,6 +111,10 @@ typedef struct tbs_stats
     uint32_t file_segments;
     int file_stopped;
     uint64_t pipeline_queued_bytes, pipeline_peak_bytes, pipeline_dropped_bytes;
+    /* TS network outputs, summed */
+    uint32_t network_outputs, network_active;
+    uint64_t network_bytes, network_errors;
+    double network_mbps;
 } tbs_stats;
 
 typedef struct tbs_device_info
@@ -126,6 +134,9 @@ typedef void (*tbs_data_cb)(void *user, int kind, const uint8_t *data, size_t le
 TBSDVB_API const char *tbs_version(void);
 
 TBSDVB_API void tbs_config_init(tbs_config *cfg);
+
+/* Checks a network output URL. Returns 0 if valid, else -1 and a message in error (if given). */
+TBSDVB_API int tbs_check_network_url(const char *url, char *error, size_t error_size);
 
 /* Fills up to max entries; returns the number of devices found (may exceed max). */
 TBSDVB_API int tbs_enumerate_devices(tbs_device_info *out, int max, int include_replay);

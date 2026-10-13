@@ -12,7 +12,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-base-dev libzmq3-dev libavformat-dev libavcodec-dev libswscale-dev libavutil-dev pkg-config
+          sudo apt-get install -y qt6-base-dev libzmq3-dev libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libsrt-gnutls-dev pkg-config
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libzmq3-dev libsrt-gnutls-dev pkg-config
       - name: ASan + UBSan
         run: |
           cmake -S . -B build-asan -DTBS_SANITIZE=ON -DTBS_BUILD_GUI=OFF -DCMAKE_BUILD_TYPE=Debug
@@ -94,7 +94,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: brew install qt zeromq ffmpeg pkg-config
+        run: brew install qt zeromq ffmpeg srt pkg-config
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
       - name: Build

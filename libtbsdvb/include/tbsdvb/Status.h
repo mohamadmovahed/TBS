@@ -61,6 +61,19 @@ struct TBSDVB_API FrontendStatus
     bool locked() const { return (flags & HasLock) != 0; }
 };
 
+// One TS network output (TsNetworkOutput).
+struct TBSDVB_API NetOutputStatus
+{
+    std::string url;
+    std::string state;        // "sending", "waiting for service 101", "connecting", "1 SRT client", errors
+    bool active = false;      // data is leaving the machine
+    int peers = 0;            // SRT: connected peers
+    uint64_t packets = 0;     // TS packets sent
+    uint64_t bytes = 0;       // payload bytes sent
+    uint64_t sendErrors = 0;  // failed or dropped datagrams / messages
+    double mbps = 0.0;        // filled by the Receiver
+};
+
 struct TBSDVB_API StreamStats
 {
     double elapsedSec = 0.0;
@@ -96,6 +109,7 @@ struct TBSDVB_API StreamStats
     int64_t fileFreeBytes = -1; // free space on the recording volume (-1 = unknown)
     uint64_t zmqMessages = 0;
     uint64_t zmqDropped = 0;
+    std::vector<NetOutputStatus> network; // one per enabled TsNetworkOutput
 };
 
 } // namespace tbs

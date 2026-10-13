@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,7 @@ public:
 };
 
 struct StreamStats;
+struct NetOutputStatus;
 
 // Records to disk. Optionally splits into segments by size or time, keeps only the
 // newest N segments, and stops cleanly before the disk is full.
@@ -127,6 +129,34 @@ private:
     uint32_t m_seq = 0;
     uint64_t m_messages = 0;
     uint64_t m_dropped = 0;
+};
+
+// Streams TS over UDP, RTP (RFC 2250/3551, payload type 33) or SRT. Takes the whole TS,
+// a PID list or one service (TsFilter). In BBFrame mode the TS is rebuilt from the
+// BBFrames of one input stream (TsNetworkOutput::isi). Sending never blocks the
+// processing thread: datagrams that do not fit the socket buffer are counted as errors.
+// SRT callers reconnect automatically; an SRT listener serves any number of clients.
+class TBSDVB_API TsNetworkSink : public IOutputSink
+{
+public:
+    TsNetworkSink(const TsNetworkOutput &opt, CaptureMode mode);
+    ~TsNetworkSink() override;
+
+    static bool srtAvailable(); // false if the library was built without libsrt
+
+    bool open(std::string *error) override;
+    void close() override;
+    bool acceptsTs(CaptureMode mode) const override { return mode == CaptureMode::TransportStream; }
+    bool acceptsBbFrames(CaptureMode mode) const override { return mode == CaptureMode::BBFrame; }
+    void writeTs(const uint8_t *packets, size_t count) override;
+    void writeBbFrame(const uint8_t *frame, size_t len, const BbHeader &hdr) override;
+
+    // Thread-safe snapshot (mbps is left at 0)
+    NetOutputStatus status() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> d;
 };
 
 } // namespace tbs

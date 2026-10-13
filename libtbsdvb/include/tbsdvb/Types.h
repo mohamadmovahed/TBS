@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace tbs {
 
@@ -42,6 +43,10 @@ enum class BbFileFormat {
 };
 
 enum class ZmqSocketKind { Pub = 0, Push = 1 };
+
+enum class NetProtocol { Udp = 0, Rtp = 1, Srt = 2 };
+
+enum class SrtMode { Caller = 0, Listener = 1 };
 
 // Everything needed to tune a satellite carrier.
 struct TBSDVB_API TuningParams
@@ -122,6 +127,43 @@ struct TBSDVB_API ZmqOutputOptions
     int sendHwm = 10000;
 };
 
+// Streams the transport stream (or one service of it) over the network.
+// In BBFrame mode the TS is rebuilt from the BBFrames of one input stream.
+// Written as a URL (see parseNetworkUrl), for example
+//   udp://239.1.1.1:1234?program=101&ttl=8&iface=eth1
+//   rtp://[ff15::1]:5004
+//   srt://:9000?mode=listener&latency=200&passphrase=secret1234
+struct TBSDVB_API TsNetworkOutput
+{
+    bool enabled = true;
+    NetProtocol protocol = NetProtocol::Udp;
+    std::string host = "239.1.1.1"; // destination; SRT listener: local address to bind (empty = any)
+    uint16_t port = 1234;
+    std::string interfaceName;      // multicast: local IPv4 address or interface name (empty = default route)
+    int ttl = 16;                   // multicast TTL / hop limit
+    int packetsPerDatagram = 7;     // 1..7 TS packets per UDP datagram / SRT message
+
+    // Content
+    int isi = -1;                   // BBFrame mode: input stream to send (-1 = first transport stream seen)
+    int programNumber = 0;          // > 0: only this service (SPTS with a rewritten PAT)
+    std::vector<uint16_t> pids;     // extra PIDs; without a program: send only these PIDs
+    bool dropNullPackets = true;
+
+    // SRT
+    SrtMode srtMode = SrtMode::Caller;
+    int srtLatencyMs = 120;
+    std::string srtPassphrase;      // empty = no encryption, else 10..79 characters
+    std::string srtStreamId;
+};
+
+// Parses udp://, rtp:// and srt:// URLs into a TsNetworkOutput. Query parameters:
+// program, pids (comma separated, 0x.. allowed), isi, ttl, iface, pkts, null (1 = keep null
+// packets), and for SRT mode (caller|listener), latency, passphrase, streamid.
+TBSDVB_API bool parseNetworkUrl(const std::string &url, TsNetworkOutput *out, std::string *error = nullptr);
+// Inverse of parseNetworkUrl; parameters at their defaults are left out.
+// redactSecrets replaces the SRT passphrase by "***" (for logs and status displays).
+TBSDVB_API std::string networkUrl(const TsNetworkOutput &o, bool redactSecrets = false);
+
 struct TBSDVB_API ReceiverConfig
 {
     DeviceSelection device;
@@ -129,6 +171,7 @@ struct TBSDVB_API ReceiverConfig
     CaptureMode capture = CaptureMode::TransportStream;
     FileOutputOptions file;
     ZmqOutputOptions zmq;
+    std::vector<TsNetworkOutput> network;
 };
 
 // A receiver found on this machine.

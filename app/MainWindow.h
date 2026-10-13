@@ -37,6 +37,7 @@ public slots:
     void applyTuning();
     // Selects a details tab by name: overview, services, ip, pids, log
     void showTab(const QString &name);
+    void showSidebar(const QString &name); // tuning or outputs
 
 protected:
     void closeEvent(QCloseEvent *event) override;

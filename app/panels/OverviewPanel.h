@@ -55,4 +55,5 @@ private:
 
     QLabel *m_file = nullptr;
     QLabel *m_zmq = nullptr;
+    QLabel *m_net = nullptr;
 };

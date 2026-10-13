@@ -84,6 +84,12 @@ ReceiverConfig toConfig(const tbs_config &c)
     r.file.splitMinutes = c.file_split_minutes;
     r.file.keepFiles = c.file_keep_files;
     r.file.minFreeMB = c.file_min_free_mb;
+    for (const auto &url : c.network_urls) {
+        const std::string u = str(url, sizeof(url));
+        TsNetworkOutput o;
+        if (!u.empty() && parseNetworkUrl(u, &o))
+            r.network.push_back(o);
+    }
     return r;
 }
 
@@ -124,6 +130,16 @@ void tbs_config_init(tbs_config *cfg)
     cfg->zmq_ts_packets_per_message = d.zmq.tsPacketsPerMessage;
     cfg->zmq_send_hwm = d.zmq.sendHwm;
     cfg->file_min_free_mb = d.file.minFreeMB;
+}
+
+int tbs_check_network_url(const char *url, char *error, size_t error_size)
+{
+    std::string err;
+    if (url && parseNetworkUrl(url, nullptr, &err))
+        return 0;
+    if (error && error_size)
+        copyString(error, error_size, url ? err : std::string("no URL"));
+    return -1;
 }
 
 int tbs_enumerate_devices(tbs_device_info *out, int max, int include_replay)
@@ -183,6 +199,15 @@ int tbs_receiver_start(tbs_receiver *rx, const tbs_config *cfg)
             cb.onBbFrame = [rx](const uint8_t *f, size_t n, const BbHeader &) { rx->dataCb(rx->dataUser, TBS_DATA_BBFRAME, f, n); };
         else
             cb.onTsPackets = [rx](const uint8_t *p, size_t n) { rx->dataCb(rx->dataUser, TBS_DATA_TS, p, n * 188); };
+    }
+    for (const auto &url : cfg->network_urls) {
+        const std::string u = str(url, sizeof(url));
+        std::string err;
+        if (!u.empty() && !parseNetworkUrl(u, nullptr, &err)) {
+            if (rx->logCb)
+                rx->logCb(rx->logUser, ("ERROR: network output: " + err).c_str());
+            return -1;
+        }
     }
     rx->rx.setCallbacks(cb);
     rx->rx.setPipelineBufferSize(static_cast<size_t>(cfg->pipeline_buffer_mb ? cfg->pipeline_buffer_mb : 128) << 20);
@@ -284,6 +309,13 @@ int tbs_receiver_get_stats(tbs_receiver *rx, tbs_stats *out)
     out->pipeline_queued_bytes = s.pipelineQueuedBytes;
     out->pipeline_peak_bytes = s.pipelinePeakBytes;
     out->pipeline_dropped_bytes = s.pipelineDroppedBytes;
+    for (const NetOutputStatus &n : s.network) {
+        ++out->network_outputs;
+        out->network_active += n.active ? 1 : 0;
+        out->network_bytes += n.bytes;
+        out->network_errors += n.sendErrors;
+        out->network_mbps += n.mbps;
+    }
     return 0;
 }
 

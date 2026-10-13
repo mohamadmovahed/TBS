@@ -4,7 +4,7 @@ Software for **TBS 6903x** (STiD135) DVB-S2/S2X receivers, in four parts:
 
 | Part | What it is | Depends on |
 |------|------------|------------|
-| **`tbsdvb`** library (`libtbsdvb/`) | Tunes the card, reads status, captures TS or BBFrames, writes files, publishes over ZeroMQ. C++17 API plus a C API. | C++17 standard library; optionally libzmq. **No Qt.** |
+| **`tbsdvb`** library (`libtbsdvb/`) | Tunes the card, reads status, captures TS or BBFrames, writes files, publishes over ZeroMQ, streams TS (or single services) over UDP/RTP/SRT. C++17 API plus a C API. | C++17 standard library; optionally libzmq and libsrt. **No Qt.** |
 | **`tbsbbproc`** library (`libbbproc/`) | Processes BBFrames: detects TS or Generic Stream per ISI. Analyses PSI/SI tables of TS streams. Decapsulates GSE and MPE, writes IP to pcap/pcapng or a TUN/TAP interface, keeps IP statistics. | `tbsdvb`; C++17 only. **No Qt, no hardware.** |
 | **`tbs-receiver`** (`app/`) | Desktop GUI built on the library. | Qt 6 (or 5.15); optionally FFmpeg for video. |
 | **`tbs-cli`**, **`tbs-bbproc`** (`tools/`) | Headless capture front end, and offline capture-file analysis. | the libraries only |
@@ -36,12 +36,13 @@ CMake ≥ 3.16 and a C++17 compiler are required. Everything else is optional an
 | `TBS_BUILD_TESTS` | ON | `ctest` unit and end-to-end tests |
 | `TBS_ENABLE_FFMPEG` | ON | Video preview in the GUI |
 | `TBSDVB_ENABLE_ZMQ` | ON | ZeroMQ sink in the library |
+| `TBSDVB_ENABLE_SRT` | ON | SRT network output (UDP and RTP need nothing extra) |
 | `TBSDVB_BUILD_SHARED` | OFF | Build `tbsdvb` as a shared library (DLL/.so) |
 
 **Linux (Debian/Ubuntu)**
 ```sh
 sudo apt install build-essential cmake pkg-config qt6-base-dev libzmq3-dev \
-                 libavformat-dev libavcodec-dev libswscale-dev libavutil-dev
+                 libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libsrt-gnutls-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j && ctest --test-dir build
 ./build/app/tbs-receiver
@@ -51,7 +52,7 @@ access to `/dev/dvb`, usually by joining the `video` group.
 
 **Windows (MSVC + vcpkg)**
 ```bat
-vcpkg install zeromq:x64-windows ffmpeg[avcodec,avformat,swscale]:x64-windows
+vcpkg install zeromq:x64-windows ffmpeg[avcodec,avformat,swscale]:x64-windows   # add libsrt:x64-windows for SRT
 cmake -S . -B build -DCMAKE_PREFIX_PATH=C:\Qt\6.7.2\msvc2019_64 ^
       -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake
 cmake --build build --config Release
@@ -60,7 +61,7 @@ C:\Qt\6.7.2\msvc2019_64\bin\windeployqt build\app\Release\tbs-receiver.exe
 Install the TBS BDA driver for the card. The library and tools can also be cross-compiled from Linux:
 `cmake -S . -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake -DTBS_BUILD_GUI=OFF -DTBSDVB_ENABLE_ZMQ=OFF`.
 
-**macOS**: `brew install cmake qt zeromq ffmpeg pkg-config`, then configure with
+**macOS**: `brew install cmake qt zeromq ffmpeg srt pkg-config`, then configure with
 `-DCMAKE_PREFIX_PATH="$(brew --prefix qt)"`. TBS has no macOS driver, so only file replay works on macOS.
 
 ## Troubleshooting: "Cannot open /dev/dvb/adapter0/frontend0"
@@ -111,6 +112,9 @@ cfg.tuning.inputStreamId = 3;                            // multistream ISI, -1 
 cfg.capture = tbs::CaptureMode::BBFrame;
 cfg.zmq.enabled = true;                                  // optional built-in outputs
 cfg.zmq.endpoint = "tcp://*:5555";
+tbs::TsNetworkOutput net;                                // stream one service as RTP multicast
+tbs::parseNetworkUrl("rtp://239.1.1.1:5004?program=101&isi=3", &net);
+cfg.network.push_back(net);
 
 tbs::Receiver rx;
 tbs::Receiver::Callbacks cb;                             // all optional; run on the capture thread
@@ -131,7 +135,8 @@ Other public pieces you can use on their own:
 - `tbs::Devices::enumerate()` lists the receivers present.
 - `ITunerDevice` gives low-level device access.
 - `TsAnalyzer`, `BbFrameExtractor`, `BbFrameToTs` and `BbHeader` are parsers you can use without a device.
-- `FileSink`, `ZmqSink`, or your own `IOutputSink` via `Receiver::addSink()`.
+- `TsFilter` cuts one service (SPTS with a rewritten PAT) or a PID list out of a transport stream.
+- `FileSink`, `ZmqSink`, `TsNetworkSink`, or your own `IOutputSink` via `Receiver::addSink()`.
 
 **Threads.** The receiver uses two threads, joined by a bounded buffer (128 MiB by default; set it
 with `setPipelineBufferSize`).
@@ -144,7 +149,8 @@ can run on either thread.
 
 **C API** (`#include <tbsdvb/tbsdvb_c.h>`) for C, Python (ctypes), C# and others:
 `tbs_config_init`, `tbs_enumerate_devices`, `tbs_receiver_create/start/stop/retune/get_status/get_stats`, and
-log, state and data callbacks. See `tools/c_api_example.c`. Build with `-DTBSDVB_BUILD_SHARED=ON` to get a
+log, state and data callbacks. Network outputs go in `tbs_config.network_urls` (up to four URLs; check one with
+`tbs_check_network_url`). See `tools/c_api_example.c`. Build with `-DTBSDVB_BUILD_SHARED=ON` to get a
 DLL/.so for other languages.
 
 ## Using the GUI
@@ -162,6 +168,8 @@ DLL/.so for other languages.
 
     The Overview shows the current segment, the free space and the processing-buffer level.
   * ZeroMQ: PUB or PUSH, bind or connect, optional topic and metadata header;
+  * **Stream TS to network**: any number of UDP, RTP or SRT outputs, each sending the whole TS, a PID list or
+    one service picked from the live service list (see below). Each row shows its rate and state while running;
   * the video preview, which can be switched on or off while running.
 * **Status**:
   * header: lock pill;
@@ -171,7 +179,7 @@ DLL/.so for other languages.
   * PIDs: per-PID share bars;
   * Log.
 * Light/dark toggle in the header. **F5** starts and stops. `--autostart` starts at launch;
-  `--theme light|dark` picks the theme.
+  `--theme light|dark` picks the theme; `--tab NAME` and `--sidebar tuning|outputs` pick the open pages.
 
 ## BBFrames
 
@@ -316,6 +324,42 @@ Turn on IP output under **Outputs → Write IP to pcap** and **Outputs → Send 
 ![Services tab](docs/screenshot-services.png)
 ![IP / GSE tab](docs/screenshot-ip-gse.png)
 
+## TS network output
+
+Each output sends the transport stream over the network. In BBFrame mode, the TS is first rebuilt from the
+BBFrames of one input stream: the ISI you give, or the first transport stream seen.
+
+| Protocol | Details |
+|---|---|
+| **UDP** | 7 TS packets (1316 bytes) per datagram by default. Unicast, broadcast or multicast; IPv4 and IPv6. For multicast, set the TTL and pick the output interface by address or name. |
+| **RTP** | RFC 2250 / RFC 3551 payload type 33 (MP2T), with a sequence number and a 90 kHz timestamp. |
+| **SRT** | Live mode. **Caller** reconnects automatically. **Listener** serves any number of clients. Optional AES (passphrase), latency and stream ID. Needs libsrt. |
+
+**Content:**
+- **Whole TS:** null packets are dropped unless you keep them.
+- **PID list:** only the PIDs you give.
+- **One service (SPTS):** the PAT is rewritten to list only that service. The PMT is followed, so the output
+  passes the PMT, PCR, elementary-stream and ECM PIDs and adapts when they change. You can add extra PIDs,
+  for example `0x12` for the EIT.
+
+**Sending:**
+- Sending never blocks the processing thread. A datagram that does not fit the socket buffer is counted as
+  dropped.
+- Output is not paced. A live card delivers in real time; a file replay is paced by its `--rate`.
+
+Outputs are written as URLs, in the GUI dialog, `tbs-cli --net`, the C API, and the settings file:
+```
+udp://239.1.1.1:1234                         whole TS
+udp://239.1.1.1:1234?program=101&ttl=8&iface=eth1
+rtp://[ff15::101]:5004?program=101&pids=0x12
+srt://:9000?mode=listener&latency=200&passphrase=at-least-10-chars
+srt://gateway.example:9000?streamid=sat1&isi=3
+```
+Parameters: `program`, `pids` (comma separated), `isi`, `null=1` (keep null packets), `pkts` (1–7 per datagram),
+`ttl`, `iface`, and for SRT `mode`, `latency`, `passphrase`, `streamid`.
+
+Receive with, for example, `ffplay udp://@239.1.1.1:1234`, `ffplay srt://host:9000` (to a listener), or VLC.
+
 ## ZeroMQ message format
 
 One message per unit: *N* × 188-byte TS packets in TS mode (default *N* = 7), or one BBFrame.
@@ -353,7 +397,13 @@ tbs-cli --list
 tbs-cli --device linux:0:0 --freq 11494 --sr 27500 --pol h --out capture.ts
 tbs-cli --device bda:0 --freq 10971 --sr 29700 --pol h --isi 3 --bbframe --zmq tcp://*:5555 --push
 ```
-Run `tbs-cli --help` for all options: LNB, tone, DiSEqC, PLS, file formats, ZeroMQ options and `--duration`.
+Run `tbs-cli --help` for all options: LNB, tone, DiSEqC, PLS, file formats, ZeroMQ, network outputs and `--duration`.
+
+Stream service 101 as multicast and the whole TS to an SRT listener at the same time:
+```
+tbs-cli --device linux:0:0 --freq 11494 --sr 27500 --pol h \
+        --net "udp://239.1.1.1:1234?program=101" --net "srt://:9000?mode=listener"
+```
 
 Rolling recording, for example 1 GiB files, keeping the last 24, and stopping below 2 GiB free:
 ```
@@ -369,8 +419,8 @@ tbs-cli --device linux:0:0 --freq 11494 --sr 27500 --out /data/cap.ts --split-si
 ## Source layout
 
 ```
-libtbsdvb/include/tbsdvb/   public API (Receiver, Types, Status, Device, Sink, parsers, C API)
-libtbsdvb/src/              implementation; platform/ holds LinuxDvbDevice and WinBdaDevice
+libtbsdvb/include/tbsdvb/   public API (Receiver, Types, Status, Device, Sink, parsers, TsFilter, C API)
+libtbsdvb/src/              implementation (sinks incl. UDP/RTP/SRT); platform/ holds LinuxDvbDevice and WinBdaDevice
 libbbproc/                  tbsbbproc: content detection, PSI/SI, GSE, MPE, IP statistics, pcap/pcapng, TUN/TAP, capture reader
 app/                        Qt GUI (theme, widgets, panels, video)
 tools/                      tbs-cli, tbs-bbproc, tbs-make-test-stream, C API example, zmq_receiver.py

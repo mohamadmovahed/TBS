@@ -4,7 +4,10 @@
 #include "tbsdvb/BbFrameToTs.h"
 #include "tbsdvb/BbHeader.h"
 #include "tbsdvb/PlsUtil.h"
+#include "tbsdvb/Psi.h"
+#include "tbsdvb/Status.h"
 #include "tbsdvb/TsAnalyzer.h"
+#include "tbsdvb/TsFilter.h"
 #include "tbsdvb/Types.h"
 
 #include "tbsdvb/Receiver.h"
@@ -16,7 +19,22 @@
 #include <fstream>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
+#include <map>
+#include <mutex>
+#include <set>
 #include <thread>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+#endif
 
 using builders::Bytes;
 using namespace tbs;
@@ -310,6 +328,452 @@ static void testReceiverReplay()
     CHECK(!rx.lastError().empty());
 }
 
+// ---------------------------------------------------------------------------
+// Network output
+// ---------------------------------------------------------------------------
+
+static void testNetworkUrl()
+{
+    TsNetworkOutput o;
+    CHECK(parseNetworkUrl("udp://239.1.1.1:1234", &o));
+    CHECK(o.protocol == NetProtocol::Udp);
+    CHECK(o.host == "239.1.1.1");
+    CHECK_EQ(o.port, 1234);
+    CHECK_EQ(o.programNumber, 0);
+    CHECK(networkUrl(o) == "udp://239.1.1.1:1234");
+
+    CHECK(parseNetworkUrl("rtp://[ff15::7]:5004?program=101&pids=0x12,256&ttl=4&iface=eth1&isi=3&pkts=5&null=1", &o));
+    CHECK(o.protocol == NetProtocol::Rtp);
+    CHECK(o.host == "ff15::7");
+    CHECK_EQ(o.port, 5004);
+    CHECK_EQ(o.programNumber, 101);
+    CHECK_EQ(o.pids.size(), 2u);
+    CHECK_EQ(o.pids[0], 0x12);
+    CHECK_EQ(o.pids[1], 256);
+    CHECK_EQ(o.ttl, 4);
+    CHECK(o.interfaceName == "eth1");
+    CHECK_EQ(o.isi, 3);
+    CHECK_EQ(o.packetsPerDatagram, 5);
+    CHECK(!o.dropNullPackets);
+    TsNetworkOutput back;
+    CHECK(parseNetworkUrl(networkUrl(o), &back));
+    CHECK(networkUrl(back) == networkUrl(o));
+
+    CHECK(parseNetworkUrl("srt://:9000?mode=listener&latency=300&passphrase=my%20secret%21", &o));
+    CHECK(o.protocol == NetProtocol::Srt);
+    CHECK(o.srtMode == SrtMode::Listener);
+    CHECK(o.host.empty());
+    CHECK_EQ(o.srtLatencyMs, 300);
+    CHECK(o.srtPassphrase == "my secret!");
+    CHECK(parseNetworkUrl(networkUrl(o), &back));
+    CHECK(back.srtPassphrase == "my secret!");
+    CHECK(back.srtMode == SrtMode::Listener);
+    CHECK(networkUrl(o, true).find("passphrase=***") != std::string::npos);
+    CHECK(networkUrl(o, true).find("secret") == std::string::npos);
+
+    std::string err;
+    CHECK(!parseNetworkUrl("http://x:1", &o, &err));
+    CHECK(!err.empty());
+    CHECK(!parseNetworkUrl("udp://239.1.1.1", &o));
+    CHECK(!parseNetworkUrl("udp://:1234", &o));          // no destination
+    CHECK(!parseNetworkUrl("udp://1.2.3.4:99999", &o));
+    CHECK(!parseNetworkUrl("udp://1.2.3.4:5?pids=0x2000", &o));
+    CHECK(!parseNetworkUrl("udp://1.2.3.4:5?pkts=8", &o));
+    CHECK(!parseNetworkUrl("udp://1.2.3.4:5?foo=1", &o));
+    CHECK(!parseNetworkUrl("srt://h:5?passphrase=short", &o));
+}
+
+// MPTS: program 1 (PMT 0x100: video 0x101 = PCR, audio 0x102 with ECM 0x103),
+// program 2 (PMT 0x200: video 0x201), SDT, nulls. pmt1Extra adds ES 0x104 to program 1.
+static std::vector<Bytes> makeMpts(size_t rounds, bool pmt1Extra = false, uint16_t pmt1Pid = 0x100,
+                                   uint8_t patVersion = 0)
+{
+    std::map<uint16_t, uint8_t> cc;
+    auto pat = [&] {
+        Bytes body;
+        builders::put16(body, 1);
+        builders::put16(body, static_cast<uint16_t>(0xE000 | pmt1Pid));
+        builders::put16(body, 2);
+        builders::put16(body, 0xE200);
+        return builders::makeSection(0x00, 0x0042, patVersion, body);
+    }();
+    auto pmt = [](uint16_t program, uint16_t pcr, std::vector<std::pair<uint8_t, uint16_t>> es, uint16_t ecmOn,
+                  uint8_t version) {
+        Bytes body;
+        builders::put16(body, static_cast<uint16_t>(0xE000 | pcr));
+        builders::put16(body, 0xF000);
+        for (auto &e : es) {
+            body.push_back(e.first);
+            builders::put16(body, static_cast<uint16_t>(0xE000 | e.second));
+            Bytes info;
+            if (e.second == ecmOn)
+                builders::addDescriptor(info, 0x09, {0x0B, 0x00, 0xE1, 0x03}); // CA 0x0B00, ECM PID 0x103
+            builders::put16(body, static_cast<uint16_t>(0xF000 | info.size()));
+            body.insert(body.end(), info.begin(), info.end());
+        }
+        return builders::makeSection(0x02, program, version, body);
+    };
+    std::vector<std::pair<uint8_t, uint16_t>> es1 = {{0x1B, 0x101}, {0x0F, 0x102}};
+    if (pmt1Extra)
+        es1.push_back({0x06, 0x104});
+    const Bytes pmt1 = pmt(1, 0x101, es1, 0x102, pmt1Extra ? 1 : 0);
+    const Bytes pmt2 = pmt(2, 0x201, {{0x02, 0x201}}, 0, 0);
+
+    std::vector<Bytes> out;
+    auto section = [&](const Bytes &sec, uint16_t pid) {
+        for (Bytes &p : builders::sectionToTs(sec, pid, cc[pid]))
+            out.push_back(p);
+    };
+    auto data = [&](uint16_t pid) { out.push_back(builders::makeTsPacket(pid, cc[pid]++, static_cast<uint8_t>(pid))); };
+    for (size_t r = 0; r < rounds; ++r) {
+        section(pat, 0);
+        section(pmt1, pmt1Pid);
+        section(pmt2, 0x200);
+        section(builders::makeSection(0x42, 0x42, 0, {0x00, 0x01, 0xFF}), 0x11);
+        for (int i = 0; i < 4; ++i) {
+            data(0x101);
+            data(0x102);
+            data(0x201);
+            data(0x1FFF);
+        }
+        data(0x103);
+        if (pmt1Extra)
+            data(0x104);
+    }
+    return out;
+}
+
+static std::map<uint16_t, size_t> pidHistogram(const std::vector<Bytes> &pk)
+{
+    std::map<uint16_t, size_t> h;
+    for (const Bytes &p : pk)
+        ++h[static_cast<uint16_t>(((p[1] & 0x1F) << 8) | p[2])];
+    return h;
+}
+
+static void testTsFilter()
+{
+    const auto in = makeMpts(10);
+    const auto inHist = pidHistogram(in);
+
+    // Whole stream: only the null packets go
+    {
+        TsFilter f;
+        std::vector<Bytes> out;
+        for (const Bytes &p : in)
+            f.push(p.data(), [&](const uint8_t *q) { out.emplace_back(q, q + 188); });
+        auto h = pidHistogram(out);
+        CHECK_EQ(h.count(0x1FFF), 0u);
+        CHECK_EQ(out.size(), in.size() - inHist.at(0x1FFF));
+    }
+    // PID list
+    {
+        TsFilterOptions o;
+        o.pids = {0x201, 0x11};
+        TsFilter f(o);
+        std::vector<Bytes> out;
+        for (const Bytes &p : in)
+            f.push(p.data(), [&](const uint8_t *q) { out.emplace_back(q, q + 188); });
+        auto h = pidHistogram(out);
+        CHECK_EQ(h.size(), 2u);
+        CHECK_EQ(h[0x201], inHist.at(0x201));
+        CHECK_EQ(h[0x11], inHist.at(0x11));
+    }
+    // Service 1: rewritten PAT, PMT, ES, PCR, ECM; nothing of service 2
+    {
+        TsFilterOptions o;
+        o.programNumber = 1;
+        TsFilter f(o);
+        std::vector<Bytes> out;
+        for (const Bytes &p : in)
+            f.push(p.data(), [&](const uint8_t *q) { out.emplace_back(q, q + 188); });
+        CHECK(f.programFound());
+        CHECK(f.pmtSeen());
+        CHECK_EQ(f.pmtPid(), 0x100);
+        const std::vector<uint16_t> expect = {0x100, 0x101, 0x102, 0x103};
+        CHECK(f.servicePids() == expect);
+        auto h = pidHistogram(out);
+        CHECK_EQ(h.count(0x200), 0u);
+        CHECK_EQ(h.count(0x201), 0u);
+        CHECK_EQ(h.count(0x11), 0u);
+        CHECK_EQ(h.count(0x1FFF), 0u);
+        CHECK_EQ(h[0], 10u);
+        CHECK_EQ(h[0x100], 10u);
+        // ES packets before the first PMT are dropped, all later ones pass
+        CHECK_EQ(h[0x101], inHist.at(0x101));
+        CHECK_EQ(h[0x102], inHist.at(0x102));
+        CHECK_EQ(h[0x103], inHist.at(0x103));
+        // The PAT lists only program 1, has a valid CRC and continuous CC
+        int lastCc = -1;
+        bool patOk = true;
+        for (const Bytes &p : out) {
+            if (p[1] != 0x40 || p[2] != 0x00)
+                continue;
+            const uint8_t *s = p.data() + 5;
+            const size_t len = 3 + (((s[1] & 0x0F) << 8) | s[2]);
+            patOk = patOk && len == 16 && crc32Mpeg(s, len) == 0 && ((s[3] << 8) | s[4]) == 0x42
+                    && ((s[8] << 8) | s[9]) == 1 && (((s[10] & 0x1F) << 8) | s[11]) == 0x100;
+            if (lastCc >= 0)
+                patOk = patOk && (p[3] & 0x0F) == ((lastCc + 1) & 0x0F);
+            lastCc = p[3] & 0x0F;
+        }
+        CHECK(patOk);
+
+        // PMT update adds ES 0x104; a PAT update moves the PMT to 0x300 (new PAT version)
+        std::vector<Bytes> out2;
+        for (const Bytes &p : makeMpts(3, true))
+            f.push(p.data(), [&](const uint8_t *q) { out2.emplace_back(q, q + 188); });
+        CHECK(pidHistogram(out2)[0x104] > 0);
+        const uint8_t oldVersion = static_cast<uint8_t>((out[0][5 + 5] >> 1) & 0x1F);
+        std::vector<Bytes> out3;
+        for (const Bytes &p : makeMpts(3, false, 0x300, 1))
+            f.push(p.data(), [&](const uint8_t *q) { out3.emplace_back(q, q + 188); });
+        CHECK_EQ(f.pmtPid(), 0x300);
+        auto h3 = pidHistogram(out3);
+        CHECK(h3[0x300] > 0);
+        CHECK_EQ(h3.count(0x100), 0u);
+        uint8_t newVersion = oldVersion;
+        for (const Bytes &p : out3)
+            if (p[1] == 0x40 && p[2] == 0)
+                newVersion = static_cast<uint8_t>((p[5 + 5] >> 1) & 0x1F);
+        CHECK(newVersion != oldVersion);
+    }
+    // Unknown service: nothing at all
+    {
+        TsFilterOptions o;
+        o.programNumber = 77;
+        TsFilter f(o);
+        size_t n = 0;
+        for (const Bytes &p : in)
+            f.push(p.data(), [&](const uint8_t *) { ++n; });
+        CHECK_EQ(n, 0u);
+        CHECK(!f.programFound());
+    }
+}
+
+// Minimal UDP receiver on 127.0.0.1 with an ephemeral port
+struct TestUdpReceiver
+{
+#ifdef _WIN32
+    SOCKET fd = INVALID_SOCKET;
+#else
+    int fd = -1;
+#endif
+    uint16_t port = 0;
+
+    TestUdpReceiver()
+    {
+#ifdef _WIN32
+        WSADATA wsa;
+        WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+        fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        int rcv = 8 * 1024 * 1024;
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char *>(&rcv), sizeof(rcv));
+        sockaddr_in a;
+        std::memset(&a, 0, sizeof(a));
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        ::bind(fd, reinterpret_cast<sockaddr *>(&a), sizeof(a));
+#ifdef _WIN32
+        int len = sizeof(a);
+        DWORD tv = 300;
+#else
+        socklen_t len = sizeof(a);
+        timeval tv{0, 300000};
+#endif
+        ::getsockname(fd, reinterpret_cast<sockaddr *>(&a), &len);
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&tv), sizeof(tv));
+        port = ntohs(a.sin_port);
+    }
+    ~TestUdpReceiver()
+    {
+#ifdef _WIN32
+        ::closesocket(fd);
+#else
+        ::close(fd);
+#endif
+    }
+    // Returns an empty buffer on timeout
+    Bytes receive()
+    {
+        Bytes b(65536);
+        const auto n = ::recv(fd, reinterpret_cast<char *>(b.data()), static_cast<int>(b.size()), 0);
+        b.resize(n > 0 ? static_cast<size_t>(n) : 0);
+        return b;
+    }
+};
+
+static void testUdpRtpOutput()
+{
+    const auto in = makeMpts(10);
+    for (int proto = 0; proto < 2; ++proto) {
+        TestUdpReceiver rx;
+        CHECK(rx.port != 0);
+        TsNetworkOutput o;
+        o.protocol = proto ? NetProtocol::Rtp : NetProtocol::Udp;
+        o.host = "127.0.0.1";
+        o.port = rx.port;
+        o.programNumber = 1;
+        TsNetworkSink sink(o, CaptureMode::TransportStream);
+        std::string err;
+        CHECK(sink.open(&err));
+        CHECK(sink.status().state.find("not in the PAT") != std::string::npos);
+        Bytes all;
+        for (const Bytes &p : in)
+            all.insert(all.end(), p.begin(), p.end());
+        sink.writeTs(all.data(), in.size());
+        sink.close(); // flushes the last partial datagram
+
+        TsFilterOptions fo;
+        fo.programNumber = 1;
+        TsFilter ref(fo);
+        size_t expected = 0;
+        for (const Bytes &p : in)
+            ref.push(p.data(), [&](const uint8_t *) { ++expected; });
+
+        size_t got = 0;
+        size_t datagrams = 0;
+        int lastSeq = -1;
+        bool headersOk = true;
+        while (true) {
+            Bytes d = rx.receive();
+            if (d.empty())
+                break;
+            ++datagrams;
+            size_t off = 0;
+            if (proto) {
+                headersOk = headersOk && d.size() >= 12 && d[0] == 0x80 && (d[1] & 0x7F) == 33;
+                const int seq = (d[2] << 8) | d[3];
+                if (lastSeq >= 0)
+                    headersOk = headersOk && seq == ((lastSeq + 1) & 0xFFFF);
+                lastSeq = seq;
+                off = 12;
+            }
+            headersOk = headersOk && (d.size() - off) % 188 == 0 && (d.size() - off) <= 7 * 188;
+            for (size_t i = off; i + 188 <= d.size(); i += 188) {
+                headersOk = headersOk && d[i] == 0x47;
+                ++got;
+            }
+        }
+        CHECK(headersOk);
+        CHECK_EQ(got, expected);
+        CHECK_EQ(datagrams, (expected + 6) / 7);
+        const NetOutputStatus st = sink.status();
+        CHECK_EQ(st.packets, expected);
+        CHECK_EQ(st.sendErrors, 0u);
+        CHECK(st.state == "sending");
+    }
+
+    // Bad address / unknown interface fail at open
+    TsNetworkOutput bad;
+    bad.host = "no-such-host.invalid";
+    std::string err;
+    CHECK(!TsNetworkSink(bad, CaptureMode::TransportStream).open(&err));
+    CHECK(!err.empty());
+#ifdef __linux__
+    bad.host = "239.1.1.1";
+    bad.interfaceName = "nosuchif0";
+    CHECK(!TsNetworkSink(bad, CaptureMode::TransportStream).open(&err));
+#endif
+    if (!TsNetworkSink::srtAvailable()) {
+        TsNetworkOutput srt;
+        srt.protocol = NetProtocol::Srt;
+        CHECK(!TsNetworkSink(srt, CaptureMode::TransportStream).open(&err));
+    }
+}
+
+// BBFrame capture -> Receiver -> TS rebuilt from ISI 2 of a multistream -> UDP
+static void testReceiverNetworkOutput()
+{
+    const auto ts = makeMpts(40);
+    // ISI 1 carries other data, ISI 2 our MPTS
+    const auto framesIsi2 = builders::tsToBbFrames(ts, 3000);
+    const auto otherTs = makeProgramPackets(2000);
+    const auto framesIsi1 = builders::tsToBbFrames(otherTs, 3000);
+    const std::string in = "tbs_test_net.ts";
+    {
+        std::FILE *f = std::fopen(in.c_str(), "wb");
+        uint8_t cc = 0;
+        auto put = [&](Bytes fr, uint8_t isi) {
+            fr[0] = static_cast<uint8_t>(fr[0] & ~0x20); // MIS
+            fr[1] = isi;
+            fr[9] = BbHeader::crc8(fr.data(), 9);
+            for (const Bytes &p : builders::bbFrameToPseudoTs(fr, cc))
+                std::fwrite(p.data(), 1, 188, f);
+        };
+        for (size_t i = 0; i < std::max(framesIsi1.size(), framesIsi2.size()); ++i) {
+            if (i < framesIsi1.size())
+                put(framesIsi1[i], 1);
+            if (i < framesIsi2.size())
+                put(framesIsi2[i], 2);
+        }
+        std::fclose(f);
+    }
+    TestUdpReceiver rx;
+    ReceiverConfig cfg;
+    cfg.device.kind = DeviceKind::FileReplay;
+    cfg.device.replayFile = in;
+    cfg.device.replayLoop = false;
+    cfg.device.replayRateMbps = 40;
+    cfg.capture = CaptureMode::BBFrame;
+    TsNetworkOutput o;
+    o.host = "127.0.0.1";
+    o.port = rx.port;
+    o.isi = 2;
+    o.programNumber = 2;
+    cfg.network.push_back(o);
+    o.enabled = false; // disabled outputs are skipped
+    cfg.network.push_back(o);
+
+    std::vector<Bytes> got;
+    std::atomic<bool> done{false};
+    std::thread reader([&] {
+        while (!done) {
+            Bytes d = rx.receive();
+            for (size_t i = 0; i + 188 <= d.size(); i += 188)
+                got.emplace_back(d.begin() + static_cast<std::ptrdiff_t>(i),
+                                 d.begin() + static_cast<std::ptrdiff_t>(i + 188));
+        }
+    });
+    Receiver r;
+    std::vector<std::string> logs;
+    std::mutex logMutex;
+    StreamStats last;
+    Receiver::Callbacks cb;
+    cb.onLog = [&](const std::string &m) {
+        std::lock_guard<std::mutex> lock(logMutex);
+        logs.push_back(m);
+    };
+    cb.onStats = [&](const StreamStats &st) { last = st; };
+    r.setCallbacks(cb);
+    r.setStatusInterval(50);
+    CHECK(r.start(cfg));
+    for (int i = 0; i < 300 && r.isRunning(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    r.stop();
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    done = true;
+    reader.join();
+    std::remove(in.c_str());
+
+    TsFilterOptions fo;
+    fo.programNumber = 2;
+    TsFilter ref(fo);
+    std::vector<Bytes> expected;
+    for (const Bytes &p : ts)
+        ref.push(p.data(), [&](const uint8_t *q) { expected.emplace_back(q, q + 188); });
+    CHECK_EQ(got.size(), expected.size());
+    CHECK(got == expected);
+    CHECK_EQ(last.network.size(), 1u);
+    if (!last.network.empty()) // the last partial datagram may be sent after the final report
+        CHECK(last.network[0].packets <= expected.size() && last.network[0].packets + 7 > expected.size());
+    bool logged = false;
+    for (const std::string &m : logs)
+        logged = logged || m.find("Streaming service 2 of ISI 2 to udp://127.0.0.1:") != std::string::npos;
+    CHECK(logged);
+}
+
 #if defined(TBS_TEST_LINUX_INTERNALS)
 #include "platform/LinuxDvbDevice.h"
 
@@ -482,6 +946,10 @@ int main()
     testReceiverReplay();
     testPipelineBackpressure();
     testFileSegments();
+    testNetworkUrl();
+    testTsFilter();
+    testUdpRtpOutput();
+    testReceiverNetworkOutput();
 #if defined(TBS_TEST_LINUX_INTERNALS)
     testLinuxDiagnostics();
 #endif

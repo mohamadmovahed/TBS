@@ -129,6 +129,26 @@ OutputPanel::OutputPanel(QWidget *parent)
         root->addWidget(hintLabel(tr("This build has no ZeroMQ support.")));
     }
 
+    // ---- TS over the network ----
+    root->addLayout(sectionHeader(tr("Stream TS to network"), nullptr));
+    auto *netBox = new QWidget;
+    m_netList = new QVBoxLayout(netBox);
+    m_netList->setContentsMargins(0, 4, 0, 4);
+    m_netList->setSpacing(6);
+    m_netEmpty = hintLabel(tr("No network outputs. Send the transport stream, or one service of it, as UDP/RTP "
+                              "multicast or over SRT."));
+    m_netList->addWidget(m_netEmpty);
+    root->addWidget(netBox);
+    m_netAdd = new QPushButton(tr("Add network output…"));
+    m_netAdd->setObjectName(QStringLiteral("Ghost"));
+    root->addWidget(m_netAdd, 0, Qt::AlignLeft);
+    connect(m_netAdd, &QPushButton::clicked, this, [this]() {
+        TsNetworkOutput o;
+        NetOutputDialog dlg(o, m_services, m_mode == CaptureMode::BBFrame, this);
+        if (dlg.exec() == QDialog::Accepted)
+            addNetRow(dlg.output());
+    });
+
     // ---- GSE -> pcap ----
     m_pcapOn = new ToggleSwitch;
     root->addLayout(sectionHeader(tr("Write IP to pcap"), m_pcapOn));
@@ -207,6 +227,11 @@ OutputPanel::OutputPanel(QWidget *parent)
     connect(m_splitMinutes, qOverload<int>(&QSpinBox::valueChanged), this, &OutputPanel::updateEnabled);
     connect(m_zmqOn, &ToggleSwitch::toggled, this, &OutputPanel::updateEnabled);
     connect(m_video, &ToggleSwitch::toggled, this, &OutputPanel::videoPreviewToggled);
+    // Long item texts must not widen the sidebar
+    for (QComboBox *c : findChildren<QComboBox *>()) {
+        c->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        c->setMinimumContentsLength(8);
+    }
     updateEnabled();
 }
 
@@ -228,6 +253,9 @@ void OutputPanel::setConfig(const tbs::ReceiverConfig &cfg, bool videoPreview)
     m_header->setChecked(cfg.zmq.metadataHeader);
     m_packetsPerMsg->setValue(cfg.zmq.tsPacketsPerMessage);
     m_hwm->setValue(cfg.zmq.sendHwm);
+    clearNetRows();
+    for (const TsNetworkOutput &o : cfg.network)
+        addNetRow(o);
 #ifdef TBS_HAVE_FFMPEG
     m_video->setChecked(videoPreview);
 #else
@@ -255,6 +283,12 @@ void OutputPanel::applyTo(tbs::ReceiverConfig &cfg) const
     cfg.zmq.metadataHeader = m_header->isChecked();
     cfg.zmq.tsPacketsPerMessage = m_packetsPerMsg->value();
     cfg.zmq.sendHwm = m_hwm->value();
+    cfg.network.clear();
+    for (const NetRow &r : m_netRows) {
+        TsNetworkOutput o = r.output;
+        o.enabled = r.on->isChecked();
+        cfg.network.push_back(o);
+    }
 }
 
 bool OutputPanel::videoPreview() const
@@ -303,6 +337,15 @@ void OutputPanel::setEditable(bool editable)
     m_tunOn->setEnabled(editable && tbs::bb::TunWriter::supported());
     m_fileOn->setEnabled(editable);
     m_zmqOn->setEnabled(editable && ZmqSink::available());
+    m_netAdd->setEnabled(editable);
+    for (NetRow &r : m_netRows) {
+        r.on->setEnabled(editable);
+        r.edit->setEnabled(editable);
+        r.remove->setEnabled(editable);
+        if (editable)
+            r.status->clear();
+        r.status->setVisible(!editable && r.on->isChecked());
+    }
     updateEnabled();
 }
 
@@ -312,7 +355,151 @@ void OutputPanel::setCaptureMode(tbs::CaptureMode mode)
     const bool bb = mode == CaptureMode::BBFrame;
     m_bbFormat->setVisible(bb);
     m_bbFormatLabel->setVisible(bb);
+    for (NetRow &r : m_netRows)
+        refreshNetRow(r);
     updateEnabled();
+}
+
+void OutputPanel::setServices(const QVector<ServiceChoice> &services)
+{
+    m_services = services;
+}
+
+void OutputPanel::addNetRow(const TsNetworkOutput &o)
+{
+    NetRow r;
+    r.output = o;
+    r.widget = new QWidget;
+    r.widget->setObjectName(QStringLiteral("Card"));
+    r.widget->setAttribute(Qt::WA_StyledBackground);
+    auto *h = new QHBoxLayout(r.widget);
+    h->setContentsMargins(12, 8, 8, 8);
+    h->setSpacing(10);
+    r.on = new ToggleSwitch;
+    r.on->setChecked(o.enabled);
+    r.on->setToolTip(tr("Send to this output on the next start"));
+    h->addWidget(r.on, 0, Qt::AlignVCenter);
+    auto *text = new QVBoxLayout;
+    text->setSpacing(1);
+    r.title = new QLabel;
+    r.title->setObjectName(QStringLiteral("ValueLabel"));
+    r.detail = new QLabel;
+    r.detail->setObjectName(QStringLiteral("Muted"));
+    r.status = new QLabel;
+    r.status->setObjectName(QStringLiteral("Muted"));
+    r.status->setTextFormat(Qt::RichText);
+    r.status->setVisible(false);
+    for (QLabel *l : {r.title, r.detail, r.status}) {
+        l->setWordWrap(true);
+        l->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        text->addWidget(l);
+    }
+    h->addLayout(text, 1);
+    r.edit = new QPushButton(tr("Edit"));
+    r.edit->setObjectName(QStringLiteral("Ghost"));
+    r.remove = new QPushButton(tr("Remove"));
+    r.remove->setObjectName(QStringLiteral("Ghost"));
+    h->addWidget(r.edit, 0, Qt::AlignVCenter);
+    h->addWidget(r.remove, 0, Qt::AlignVCenter);
+    QWidget *w = r.widget;
+    connect(r.edit, &QPushButton::clicked, this, [this, w]() { editNetRow(w); });
+    connect(r.remove, &QPushButton::clicked, this, [this, w]() { removeNetRow(w); });
+    m_netList->addWidget(w);
+    m_netRows.push_back(r);
+    refreshNetRow(m_netRows.back());
+    m_netEmpty->setVisible(false);
+}
+
+void OutputPanel::refreshNetRow(NetRow &r)
+{
+    const TsNetworkOutput &o = r.output;
+    const QString proto = o.protocol == NetProtocol::Rtp ? QStringLiteral("RTP")
+                          : o.protocol == NetProtocol::Srt ? QStringLiteral("SRT")
+                                                           : QStringLiteral("UDP");
+    const bool listener = o.protocol == NetProtocol::Srt && o.srtMode == SrtMode::Listener;
+    const QString host = o.host.empty() ? QStringLiteral("*") : QString::fromStdString(o.host);
+    const QString hostPort = host.contains(QLatin1Char(':')) ? QStringLiteral("[%1]:%2").arg(host).arg(o.port)
+                                                             : QStringLiteral("%1:%2").arg(host).arg(o.port);
+    r.title->setText(listener ? tr("%1 listener on %2").arg(proto, hostPort) : QStringLiteral("%1 %2").arg(proto, hostPort));
+    QStringList d;
+    if (o.programNumber > 0) {
+        QString name;
+        for (const ServiceChoice &s : m_services)
+            if (s.programNumber == o.programNumber && (o.isi < 0 || s.isi < 0 || s.isi == o.isi))
+                name = s.name;
+        d << (name.isEmpty() ? tr("service %1").arg(o.programNumber) : tr("service %1 (%2)").arg(o.programNumber).arg(name));
+    } else {
+        d << (o.pids.empty() ? tr("whole TS") : tr("%n PID(s)", nullptr, static_cast<int>(o.pids.size())));
+    }
+    if (o.programNumber > 0 && !o.pids.empty())
+        d << tr("+%n PID(s)", nullptr, static_cast<int>(o.pids.size()));
+    if (m_mode == CaptureMode::BBFrame)
+        d << (o.isi >= 0 ? tr("ISI %1").arg(o.isi) : tr("first TS input stream"));
+    if (o.protocol == NetProtocol::Srt) {
+        d << tr("latency %1 ms").arg(o.srtLatencyMs);
+        if (!o.srtPassphrase.empty())
+            d << tr("encrypted");
+    } else if (!o.interfaceName.empty()) {
+        d << tr("via %1").arg(QString::fromStdString(o.interfaceName));
+    }
+    r.detail->setText(d.join(QStringLiteral(" · ")));
+    r.widget->setToolTip(QString::fromStdString(networkUrl(o, true)));
+}
+
+void OutputPanel::editNetRow(QWidget *w)
+{
+    for (NetRow &r : m_netRows) {
+        if (r.widget != w)
+            continue;
+        NetOutputDialog dlg(r.output, m_services, m_mode == CaptureMode::BBFrame, this);
+        if (dlg.exec() == QDialog::Accepted) {
+            r.output = dlg.output();
+            refreshNetRow(r);
+        }
+        return;
+    }
+}
+
+void OutputPanel::removeNetRow(QWidget *w)
+{
+    for (int i = 0; i < m_netRows.size(); ++i) {
+        if (m_netRows[i].widget == w) {
+            m_netRows.removeAt(i);
+            w->deleteLater();
+            break;
+        }
+    }
+    m_netEmpty->setVisible(m_netRows.isEmpty());
+}
+
+void OutputPanel::clearNetRows()
+{
+    for (NetRow &r : m_netRows)
+        delete r.widget;
+    m_netRows.clear();
+    m_netEmpty->setVisible(true);
+}
+
+void OutputPanel::setNetworkStatus(const std::vector<tbs::NetOutputStatus> &status)
+{
+    size_t i = 0;
+    const Theme::Tokens &t = Theme::tokens();
+    for (NetRow &r : m_netRows) {
+        if (!r.on->isChecked())
+            continue;
+        if (i >= status.size())
+            break;
+        const NetOutputStatus &s = status[i++];
+        const QColor dot = s.active ? t.good : s.sendErrors ? t.warning : t.muted;
+        QString text = QStringLiteral("<span style=\"color:%1\">●</span> ").arg(dot.name());
+        if (s.active)
+            text += tr("%1 Mbit/s · ").arg(s.mbps, 0, 'f', 2);
+        text += QString::fromStdString(s.state).toHtmlEscaped();
+        if (s.sendErrors)
+            text += tr(" · %1 dropped").arg(s.sendErrors);
+        r.status->setText(text);
+        r.status->setVisible(true);
+    }
 }
 
 void OutputPanel::updateEnabled()
