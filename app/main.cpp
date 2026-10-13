@@ -17,7 +17,7 @@ int main(int argc, char *argv[])
     parser.setApplicationDescription(QStringLiteral("Tune a TBS 6903x and capture TS / BBFrames to file and ZeroMQ"));
     parser.addHelpOption();
     parser.addVersionOption();
-    const QCommandLineOption autostart(QStringLiteral("autostart"), QStringLiteral("Start capturing with the last used settings"));
+    const QCommandLineOption autostart(QStringLiteral("autostart"), QStringLiteral("Start all receivers with the last used settings"));
     const QCommandLineOption theme(QStringLiteral("theme"), QStringLiteral("dark or light"), QStringLiteral("theme"));
     const QCommandLineOption tab(QStringLiteral("tab"), QStringLiteral("Initial details tab: overview, services, epg, monitor, ip, pids, log"),
                                  QStringLiteral("name"));
@@ -42,6 +42,6 @@ int main(int argc, char *argv[])
     if (parser.isSet(sidebar))
         w.showSidebar(parser.value(sidebar));
     if (parser.isSet(autostart))
-        QTimer::singleShot(0, &w, &MainWindow::startCapture);
+        QTimer::singleShot(0, &w, &MainWindow::startAll);
     return app.exec();
 }

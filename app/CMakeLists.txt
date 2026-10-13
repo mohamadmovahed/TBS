@@ -6,6 +6,7 @@ message(STATUS "GUI: Qt ${QT_VERSION}")
 add_executable(tbs-receiver
     main.cpp
     MainWindow.cpp MainWindow.h
+    ReceiverPage.cpp ReceiverPage.h
     ReceiverController.cpp ReceiverController.h
     SettingsStore.cpp SettingsStore.h
     Theme.cpp Theme.h

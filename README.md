@@ -159,6 +159,13 @@ DLL/.so for other languages.
 
 ## Using the GUI
 
+* **Several receivers at once**: **+ Add receiver** opens another tuner in its own tab. For example, the second
+  tuner of a TBS 6903x defaults to the next adapter. Each tab has its own:
+  * settings, outputs and preview;
+  * EPG, monitor and alarms.
+
+  The tab dot shows the state: locked, searching or stopped. Double-click a tab to rename it, and use
+  Ctrl+Tab to switch. Only the receiver on screen is heard. `--autostart` starts them all.
 * **Tuning**: receiver, frequency, symbol rate, standard, LNB (universal, single LO or direct L-band),
   polarization, 22 kHz tone, DiSEqC 1.0 port, input stream ID and PLS (root/gold), plus TS or BBFrame capture.
   The tuner IF is computed and checked live. While capturing, change the tuning and press **Apply tuning**
@@ -245,6 +252,7 @@ tbs-daemon --config tbs-daemon.json --listen 0.0.0.0:8080 --token "$(openssl ran
 - **Config:** the JSON file holds `receiver` (device, tuning, capture, file, zmq, network outputs as URLs),
   `processing` (pcap, TUN/TAP), `monitor` (alarm thresholds and command), `api` (listen address, token),
   `autostart` and `restartDelaySec`. `packaging/tbs-daemon.json` is an example.
+- **Several tuners:** run one daemon per tuner, each with its own config file and port.
 - **Restarts:** when the receiver stops with an error (device gone, driver reloaded), it is restarted after
   `restartDelaySec`.
 - **Service:** `packaging/tbs-daemon.service` is a systemd unit. It runs as a `tbs` user in the `video` group,
