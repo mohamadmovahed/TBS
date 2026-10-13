@@ -12,6 +12,7 @@ add_library(tbs-daemon-core STATIC
     HttpServer.cpp HttpServer.h
     DaemonConfig.cpp DaemonConfig.h
     Daemon.cpp Daemon.h
+    ScanApi.cpp
     ${TBS_DASHBOARD_HEADER})
 target_include_directories(tbs-daemon-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(tbs-daemon-core PUBLIC TbsDvb::tbsbbproc)

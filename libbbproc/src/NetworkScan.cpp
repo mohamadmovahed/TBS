@@ -131,7 +131,7 @@ NetworkScanResult runNetworkScan(Receiver &rx, Processor &proc, const std::vecto
 
         // The status is refreshed periodically: give the demodulator and the status time to follow
         sleepMs(700);
-        while (!rx.status().locked() && secondsSince(t0) * 1000 < opt.lockTimeoutMs && !cancelled() && rx.isRunning())
+        while (!rx.status().locked() && secondsSince(t0) * 1000 < opt.lockTimeoutMs + 700 && !cancelled() && rx.isRunning())
             sleepMs(100);
         tp.locked = rx.status().locked();
         if (!rx.isRunning())

@@ -96,6 +96,7 @@ Daemon::Daemon(DaemonConfig cfg, std::string configPath)
 
 Daemon::~Daemon()
 {
+    cancelScan();
     stopServer();
     stopReceiver();
 }
@@ -142,6 +143,15 @@ void Daemon::stopServer()
 
 bool Daemon::startReceiver(std::string *error)
 {
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_scan.running && m_scan.kind != "network") {
+            const std::string err = "a " + m_scan.kind + " scan uses the frontend (POST /api/v1/scan/cancel)";
+            if (error)
+                *error = err;
+            return false;
+        }
+    }
     stopReceiver();
     DaemonConfig cfg;
     {
@@ -216,6 +226,13 @@ bool Daemon::startReceiver(std::string *error)
 
 void Daemon::stopReceiver()
 {
+    bool networkScan = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        networkScan = m_scan.running && m_scan.kind == "network";
+    }
+    if (networkScan) // it uses the receiver
+        cancelScan();
     std::unique_ptr<tbs::Receiver> rx;
     std::shared_ptr<tbs::bb::Processor> proc;
     {
@@ -237,7 +254,8 @@ void Daemon::tick()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         const bool running = m_rx && m_rx->isRunning();
-        if (m_wanted && !running && m_cfg.restartDelaySec > 0 && m_stoppedAtMs
+        const bool frontendScan = m_scan.running && m_scan.kind != "network";
+        if (m_wanted && !running && !frontendScan && m_cfg.restartDelaySec > 0 && m_stoppedAtMs
             && nowMs() - m_stoppedAtMs >= static_cast<int64_t>(m_cfg.restartDelaySec) * 1000)
             restart = true;
         why = m_lastError;
@@ -686,6 +704,12 @@ http::Response Daemon::handle(const http::Request &req)
         }
         if (ep == "log")
             return Response::json(logJson(static_cast<size_t>(std::max(1, std::atoi(req.param("lines", "200").c_str())))).dump());
+        if (ep == "scan")
+            return Response::json(scanJson(true).dump());
+        if (ep == "scan/capabilities")
+            return Response::json(capabilitiesJson().dump());
+        if (ep == "constellation")
+            return Response::json(constellationJson(std::atoi(req.param("samples", "1024").c_str())).dump());
         return Response::error(404, "unknown endpoint");
     }
 
@@ -695,6 +719,12 @@ http::Response Daemon::handle(const http::Request &req)
             if (!startReceiver(&err))
                 return Response::error(409, err);
             return Response::json(statusJson().dump());
+        }
+        if (ep == "scan/spectrum" || ep == "scan/blind" || ep == "scan/network")
+            return startScan(ep.substr(5), req.body);
+        if (ep == "scan/cancel") {
+            cancelScan();
+            return Response::json(scanJson(false).dump());
         }
         if (ep == "stop") {
             stopReceiver();

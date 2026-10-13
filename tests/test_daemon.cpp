@@ -268,6 +268,7 @@ static void testDaemonApi()
     cfg.receiver.device.kind = tbs::DeviceKind::FileReplay;
     cfg.receiver.device.replayFile = file;
     cfg.receiver.device.replayRateMbps = 5;
+    cfg.receiver.device.replayLoop = true;
     cfg.receiver.capture = tbs::CaptureMode::BBFrame;
     cfg.token = "tok";
     cfg.restartDelaySec = 0;
@@ -328,9 +329,49 @@ static void testDaemonApi()
     CHECK(csv.contentType.find("text/csv") == 0 && csv.body.rfind("time,unix_ms", 0) == 0);
     CHECK(call("GET", "/api/v1/log?lines=5").status == 200);
 
+    // Scans: the frontend scans need the receiver stopped, the network scan needs it running
+    auto waitScan = [&]() {
+        json::Value sc;
+        for (int i = 0; i < 200; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            json::parse(call("GET", "/api/v1/scan").body, &sc);
+            if (!sc.get("running").toBool())
+                break;
+        }
+        return sc;
+    };
+    CHECK(call("POST", "/api/v1/scan/spectrum", R"({"start": 10700, "end": 11700})").status == 409);
+    CHECK(call("POST", "/api/v1/scan/network", R"({"tableTimeoutMs": 300, "lockTimeoutMs": 3000})").status == 202);
+    CHECK(call("POST", "/api/v1/scan/network", "{}").status == 409); // one at a time
+    json::Value sc = waitScan();
+    CHECK(sc.get("kind").toString() == "network");
+    CHECK(!sc.get("running").toBool());
+    CHECK(sc.get("error").toString().empty());
+    CHECK(sc.get("result").get("transponders").size() == 1);
+    CHECK(sc.get("result").get("transponders")[0].get("locked").toBool());
+    CHECK(!sc.get("result").get("transponders")[0].get("tablesComplete").toBool()); // no SI in this stream
+    json::Value iq;
+    CHECK(json::parse(call("GET", "/api/v1/constellation?samples=256").body, &iq));
+    CHECK(iq.get("running").toBool());
+    for (int i = 0; i < 40 && iq.get("supported").toBool(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        json::parse(call("GET", "/api/v1/constellation").body, &iq);
+    }
+    CHECK(!iq.get("supported").toBool()); // file replay has no IQ samples
+
     CHECK(call("POST", "/api/v1/stop").status == 200);
     json::parse(call("GET", "/api/v1/status").body, &st);
     CHECK(st.get("state").toString() == "stopped" && !st.get("wanted").toBool());
+
+    CHECK(call("POST", "/api/v1/scan/network", "{}").status == 409);
+    CHECK(call("POST", "/api/v1/scan/blind", R"({"start": 12000, "end": 11000})").status == 400);
+    CHECK(call("POST", "/api/v1/scan/spectrum", R"({"start": 10700, "end": 11700, "polarization": "both"})").status == 202);
+    sc = waitScan();
+    CHECK(sc.get("kind").toString() == "spectrum");
+    CHECK(sc.get("error").toString().find("neumoDVB") != std::string::npos);
+    json::Value caps;
+    CHECK(json::parse(call("GET", "/api/v1/scan/capabilities").body, &caps));
+    CHECK(!caps.get("probed").toBool() && !caps.get("note").toString().empty());
     std::remove(file.c_str());
 }
 

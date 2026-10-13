@@ -4,7 +4,11 @@
 //   tbs-cli --device linux:0:0 --freq 11494 --sr 27500 --pol h --out capture.ts
 //   tbs-cli --device bda:0 --freq 10971 --sr 29700 --pol h --bbframe --zmq tcp://*:5555
 //   tbs-cli --device replay:video_bb.ts --rate 5 --bbframe --out frames.bbf --duration 10
+//   tbs-cli --device linux:0 --spectrum 10700-12750 --pol both --csv spectrum.csv
+//   tbs-cli --device linux:0 --blindscan 10700-12750 --pol both
+//   tbs-cli --device linux:0 --freq 11494 --sr 27500 --pol h --nit-scan
 
+#include "tbsbbproc/NetworkScan.h"
 #include "tbsbbproc/Processor.h"
 #include "tbsdvb/tbsdvb.h"
 
@@ -14,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -58,8 +63,143 @@ void usage(const char *argv0)
         "                              write IP packets from GSE (BBFrame mode) or MPE (TS) to a pcap file\n"
         "  --tun NAME [--tap]          send those packets to a Linux TUN (IP) or TAP (Ethernet) interface\n"
         "  --duration SEC              stop after SEC seconds (default: until Ctrl+C)\n"
-        "  --quiet                     no periodic status line\n",
+        "  --quiet                     no periodic status line\n"
+        "Scanning (spectrum, blind scan and IQ need the neumoDVB driver; --pol both scans H and V):\n"
+        "  --caps                      show what the driver supports\n"
+        "  --spectrum MHZ-MHZ [--sweep] [--resolution KHZ] [--fft-size N] [--csv FILE]\n"
+        "                              measure the spectrum, list carrier candidates\n"
+        "  --blindscan MHZ-MHZ [--max-sr KSPS]\n"
+        "                              find and lock all carriers in the range\n"
+        "  --nit-scan [--nit-other] [--all-positions]\n"
+        "                              tune --freq, then every transport the NIT lists; print the services\n",
         argv0);
+}
+
+bool parseRange(const std::string &v, double &a, double &b)
+{
+    return std::sscanf(v.c_str(), "%lf-%lf", &a, &b) == 2 && b > a;
+}
+
+std::vector<tbs::Polarization> polarizations(bool both, tbs::Polarization p)
+{
+    if (both)
+        return {tbs::Polarization::HorizontalLeft18V, tbs::Polarization::VerticalRight13V};
+    return {p};
+}
+
+bool progressLine(double f, const std::string &msg)
+{
+    if (f >= 0)
+        std::fprintf(stderr, "\r%3.0f%% %-70s", f * 100.0, msg.substr(0, 70).c_str());
+    return !g_stop;
+}
+
+int runSpectrum(const tbs::ReceiverConfig &cfg, double a, double b, bool both, bool sweep, int resolution, int fft,
+                const std::string &csv)
+{
+    std::ofstream out;
+    if (!csv.empty()) {
+        out.open(csv);
+        if (!out) {
+            std::fprintf(stderr, "error: cannot write %s\n", csv.c_str());
+            return 1;
+        }
+        out << "frequency_mhz,polarization,level_db\n";
+    }
+    for (tbs::Polarization pol : polarizations(both, cfg.tuning.polarization)) {
+        tbs::SpectrumRequest req;
+        req.startMHz = a;
+        req.endMHz = b;
+        req.lnb = cfg.tuning;
+        req.lnb.polarization = pol;
+        req.method = sweep ? tbs::SpectrumMethod::Sweep : tbs::SpectrumMethod::Fft;
+        req.resolutionKHz = resolution;
+        req.fftSize = fft;
+        tbs::SpectrumResult res;
+        std::string err;
+        const char p = pol == tbs::Polarization::VerticalRight13V ? 'V' : 'H';
+        const bool ok = tbs::Scan::spectrum(cfg.device, req, &res, &err, progressLine);
+        std::fprintf(stderr, "\n");
+        if (!ok) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        std::printf("%c: %zu points, %zu carrier candidates\n", p, res.points.size(), res.peaks.size());
+        for (const tbs::SpectrumPeak &pk : res.peaks)
+            std::printf("  %10.3f MHz %c  ~%6.0f kS/s  %6.1f dB%s\n", pk.frequencyMHz, p, pk.symbolRateKsps, pk.level,
+                        res.decibel ? "" : " (relative)");
+        if (out)
+            for (const tbs::SpectrumPoint &pt : res.points)
+                out << pt.frequencyMHz << ',' << p << ',' << pt.level << '\n';
+    }
+    return 0;
+}
+
+int runBlindScan(const tbs::ReceiverConfig &cfg, double a, double b, bool both, int maxSr)
+{
+    size_t total = 0;
+    for (tbs::Polarization pol : polarizations(both, cfg.tuning.polarization)) {
+        tbs::BlindScanRequest req;
+        req.startMHz = a;
+        req.endMHz = b;
+        req.lnb = cfg.tuning;
+        req.lnb.polarization = pol;
+        if (maxSr > 0)
+            req.maxSymbolRateKsps = maxSr;
+        std::vector<tbs::BlindScanCarrier> found;
+        std::string err;
+        const bool ok = tbs::Scan::blindScan(cfg.device, req, &found, &err, progressLine,
+                                             [](const tbs::BlindScanCarrier &c) {
+                                                 std::fprintf(stderr, "\r%-78s\n", ("  " + c.describe()).c_str());
+                                             });
+        std::fprintf(stderr, "\n");
+        if (!ok) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        for (const tbs::BlindScanCarrier &c : found)
+            std::printf("%s\n", c.describe().c_str());
+        total += found.size();
+    }
+    std::printf("%zu carriers\n", total);
+    return 0;
+}
+
+int runNitScan(tbs::ReceiverConfig cfg, const tbs::bb::NetworkScanOptions &opt)
+{
+    tbs::bb::Processor proc;
+    tbs::Receiver rx;
+    tbs::Receiver::Callbacks cb;
+    cb.onLog = [](const std::string &m) { std::fprintf(stderr, "%s\n", m.c_str()); };
+    if (cfg.capture == tbs::CaptureMode::BBFrame)
+        cb.onBbFrame = [&](const uint8_t *f, size_t n, const tbs::BbHeader &h) { proc.pushBbFrame(f, n, h); };
+    else
+        cb.onTsPackets = [&](const uint8_t *p, size_t n) { proc.pushTs(p, n); };
+    rx.setCallbacks(cb);
+    rx.setStatusInterval(200);
+    cfg.file.enabled = false;
+    cfg.zmq.enabled = false;
+    cfg.network.clear();
+    if (!rx.start(cfg))
+        return 1;
+    std::atomic<bool> cancel{false};
+    std::thread watch([&]() {
+        while (!g_stop && !cancel)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        cancel = true;
+    });
+    const auto result = tbs::bb::runNetworkScan(
+        rx, proc, {cfg.tuning}, opt,
+        [](const tbs::bb::NetworkScanProgress &p) {
+            if (p.index < p.total)
+                std::fprintf(stderr, "[%d/%d] %s\n", p.index + 1, p.total, p.message.c_str());
+        },
+        {}, &cancel);
+    cancel = true;
+    watch.join();
+    rx.stop();
+    std::printf("%s", tbs::bb::formatNetworkScan(result).c_str());
+    return result.transponders.empty() ? 1 : 0;
 }
 
 std::string kindName(tbs::DeviceKind k)
@@ -118,6 +258,12 @@ int main(int argc, char **argv)
     bool analyze = false;
     size_t bufferMB = 128;
     tbs::bb::ProcessorConfig procCfg;
+    enum class Mode { Receive, Caps, Spectrum, BlindScan, NitScan } mode = Mode::Receive;
+    double rangeA = 0, rangeB = 0;
+    bool bothPol = false, sweep = false;
+    int resolution = 0, fftSize = 512, maxSr = 0;
+    std::string csv;
+    tbs::bb::NetworkScanOptions nitOpt;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -165,6 +311,7 @@ int main(int argc, char **argv)
             cfg.tuning.lnbSwitchMHz = std::stod(next());
         } else if (a == "--pol") {
             const std::string v = next();
+            bothPol = v == "both";
             cfg.tuning.polarization = v == "v" || v == "r" ? tbs::Polarization::VerticalRight13V
                 : v == "off"                               ? tbs::Polarization::Off
                                                            : tbs::Polarization::HorizontalLeft18V;
@@ -243,6 +390,30 @@ int main(int argc, char **argv)
             duration = std::stod(next());
         } else if (a == "--quiet") {
             quiet = true;
+        } else if (a == "--caps") {
+            mode = Mode::Caps;
+        } else if (a == "--spectrum" || a == "--blindscan") {
+            mode = a == "--spectrum" ? Mode::Spectrum : Mode::BlindScan;
+            if (!parseRange(next(), rangeA, rangeB)) {
+                std::fprintf(stderr, "%s needs a range like 10700-12750\n", a.c_str());
+                return 2;
+            }
+        } else if (a == "--sweep") {
+            sweep = true;
+        } else if (a == "--resolution") {
+            resolution = std::stoi(next());
+        } else if (a == "--fft-size") {
+            fftSize = std::stoi(next());
+        } else if (a == "--csv") {
+            csv = next();
+        } else if (a == "--max-sr") {
+            maxSr = std::stoi(next());
+        } else if (a == "--nit-scan") {
+            mode = Mode::NitScan;
+        } else if (a == "--nit-other") {
+            nitOpt.includeNitOther = true;
+        } else if (a == "--all-positions") {
+            nitOpt.sameOrbitalPosition = false;
         } else {
             std::fprintf(stderr, "unknown option %s\n", a.c_str());
             usage(argv[0]);
@@ -262,6 +433,27 @@ int main(int argc, char **argv)
 
     std::signal(SIGINT, onSignal);
     std::signal(SIGTERM, onSignal);
+
+    switch (mode) {
+    case Mode::Caps: {
+        const tbs::ScanCapabilities c = tbs::Scan::capabilities(cfg.device);
+        std::printf("neumoDVB API     : %s\nspectrum (sweep) : %s\nspectrum (FFT)   : %s\nblind scan       : %s\n"
+                    "constellation    : %s\n",
+                    c.neumoApi ? "yes" : "no", c.spectrumSweep ? "yes" : "no", c.spectrumFft ? "yes" : "no",
+                    c.blindScan ? "yes" : "no", c.constellation ? "yes" : "no");
+        if (!c.note.empty())
+            std::printf("%s\n", c.note.c_str());
+        return c.probed ? 0 : 1;
+    }
+    case Mode::Spectrum:
+        return runSpectrum(cfg, rangeA, rangeB, bothPol, sweep, resolution, fftSize, csv);
+    case Mode::BlindScan:
+        return runBlindScan(cfg, rangeA, rangeB, bothPol, maxSr);
+    case Mode::NitScan:
+        return runNitScan(cfg, nitOpt);
+    case Mode::Receive:
+        break;
+    }
 
     tbs::Receiver rx;
     tbs::Receiver::Callbacks cb;
