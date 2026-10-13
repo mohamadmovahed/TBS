@@ -162,6 +162,60 @@ class Module(unittest.TestCase):
         with open(path) as f:
             self.assertTrue(f.readline().startswith("time,unix_ms"))
 
+    def test_scan_needs_neumo_driver(self):
+        dev = tbsdvb.DeviceSelection()
+        dev.kind = tbsdvb.DeviceKind.FileReplay
+        caps = tbsdvb.scan_capabilities(dev)
+        self.assertFalse(caps["probed"])
+        self.assertTrue(caps["note"])
+        with self.assertRaises(RuntimeError):
+            tbsdvb.spectrum(dev, 10700, 12750)
+        with self.assertRaises(RuntimeError):
+            tbsdvb.blind_scan(dev, 10700, 12750)
+
+    def test_network_scan_and_constellation(self):
+        capture = os.path.join(self.tmp, "si.ts")
+        subprocess.check_call([os.environ["TBS_MAKE_TEST_STREAM"], "--add-si", "--out", capture],
+                              stdout=subprocess.DEVNULL)
+        cfg = tbsdvb.ReceiverConfig()
+        cfg.device.kind = tbsdvb.DeviceKind.FileReplay
+        cfg.device.replay_file = capture
+        cfg.device.replay_rate_mbps = 10
+        cfg.device.replay_loop = True
+        cfg.capture = tbsdvb.CaptureMode.BBFrame
+        cfg.tuning.frequency_mhz = 11494
+        rx = tbsdvb.Receiver()
+        proc = tbsdvb.Processor()
+        rx.attach_processor(proc)
+        rx.set_status_interval(100)
+        rx.set_constellation_samples(128)
+        self.assertTrue(rx.start(cfg))
+        try:
+            progress = []
+            r = tbsdvb.network_scan(rx, proc, [cfg.tuning], table_timeout_ms=1000,
+                                    progress=lambda i, n, msg: progress.append((i, n, msg)))
+            # The NIT lists this transport and three more at 13.0E
+            self.assertEqual(len(r["transponders"]), 4)
+            self.assertTrue(all(t["locked"] for t in r["transponders"]))
+            freqs = sorted(round(t["tuning"].frequency_mhz) for t in r["transponders"])
+            self.assertEqual(freqs, [11053, 11494, 11817, 12187])
+            self.assertEqual(r["network_name"], "TBS Demo Network")
+            self.assertIn("4 transponders", r["text"])
+            self.assertTrue(progress)
+            # NIT transports carry the parsed satellite delivery descriptor
+            nets = [s for s in proc.snapshot()["streams"] if s["ts"]["networks"]]
+            sat = nets[0]["ts"]["networks"][0]["transports"][0]["satellite"]
+            self.assertEqual(sat["polarization"], "H")
+            self.assertAlmostEqual(sat["orbital_position"], 13.0)
+            # File replay has no IQ samples
+            for _ in range(50):
+                if rx.constellation() is None:
+                    break
+                time.sleep(0.05)
+            self.assertIsNone(rx.constellation())
+        finally:
+            rx.stop()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -22,7 +22,7 @@ std::string BlindScanCarrier::describe() const
     if (fec >= 0)
         s += " " + DvbNames::fec(fec);
     if (isis.size() > 1) {
-        s += util::format(", %zu streams (ISI", isis.size());
+        s += util::format(", %u streams (ISI", static_cast<unsigned>(isis.size()));
         for (size_t i = 0; i < isis.size() && i < 8; ++i)
             s += util::format(" %d", isis[i]);
         s += isis.size() > 8 ? " ...)" : ")";
@@ -166,6 +166,7 @@ std::vector<SpectrumPeak> findPeaks(const std::vector<SpectrumPoint> &pts, doubl
     return peaks;
 }
 
+#if defined(TBSDVB_HAVE_LINUX_DVB)
 namespace {
 
 bool runSegments(const std::vector<BandSegment> &segs, const ProgressFn &progress, std::string *error,
@@ -198,6 +199,7 @@ bool runSegments(const std::vector<BandSegment> &segs, const ProgressFn &progres
 }
 
 } // namespace
+#endif
 
 ScanCapabilities capabilities(const DeviceSelection &sel)
 {

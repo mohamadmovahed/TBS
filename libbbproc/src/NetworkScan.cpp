@@ -225,7 +225,8 @@ std::string formatNetworkScan(const NetworkScanResult &r)
             out += "no lock\n";
             continue;
         }
-        std::snprintf(line, sizeof(line), "TSID %u ONID %u, %zu services%s (%.1f s)\n", t.tsid, t.onid, t.services.size(),
+        std::snprintf(line, sizeof(line), "TSID %u ONID %u, %u services%s (%.1f s)\n", t.tsid, t.onid,
+                      static_cast<unsigned>(t.services.size()),
                       t.tablesComplete ? "" : ", tables incomplete", t.seconds);
         out += line;
         for (const ServiceInfo &s : t.services) {
@@ -234,7 +235,8 @@ std::string formatNetworkScan(const NetworkScanResult &r)
             out += line;
         }
     }
-    std::snprintf(line, sizeof(line), "%zu transponders, %zu services%s\n", r.transponders.size(), r.serviceCount(),
+    std::snprintf(line, sizeof(line), "%u transponders, %u services%s\n", static_cast<unsigned>(r.transponders.size()),
+                  static_cast<unsigned>(r.serviceCount()),
                   r.cancelled ? " (cancelled)" : "");
     out += line;
     return out;

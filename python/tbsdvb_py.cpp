@@ -14,9 +14,11 @@
 #include <pybind11/stl.h>
 
 #include <tbsbbproc/CaptureFile.h>
+#include <tbsbbproc/NetworkScan.h>
 #include <tbsbbproc/Processor.h>
 #include <tbsdvb/tbsdvb.h>
 
+#include <atomic>
 #include <cmath>
 #include <memory>
 #include <mutex>
@@ -130,9 +132,19 @@ py::dict tsReportDict(const bb::TsReport &t)
         x["actual"] = n.actual;
         x["name"] = n.name;
         py::list tps;
-        for (const auto &tp : n.transports)
-            tps.append(py::dict(py::arg("tsid") = tp.tsid, py::arg("onid") = tp.onid, py::arg("delivery") = tp.delivery,
-                                py::arg("service_ids") = tp.serviceIds));
+        for (const auto &tp : n.transports) {
+            py::dict t(py::arg("tsid") = tp.tsid, py::arg("onid") = tp.onid, py::arg("delivery") = tp.delivery,
+                       py::arg("service_ids") = tp.serviceIds);
+            if (tp.sat.valid)
+                t["satellite"] = py::dict(
+                    py::arg("frequency_mhz") = tp.sat.frequencyMHz, py::arg("symbol_rate_ksps") = tp.sat.symbolRateKsps,
+                    py::arg("polarization") = std::string(1, "HVLR"[tp.sat.polarization & 3]),
+                    py::arg("orbital_position") = tp.sat.orbitalPositionDeg * (tp.sat.east ? 1.0 : -1.0),
+                    py::arg("s2") = tp.sat.s2, py::arg("modulation") = tp.sat.modulation, py::arg("fec") = tp.sat.fecInner,
+                    py::arg("rolloff") = tp.sat.rolloff, py::arg("isi") = tp.sat.inputStreamId,
+                    py::arg("pls_gold") = tp.sat.hasPls ? py::object(py::int_(tp.sat.plsGold)) : py::object(py::none()));
+            tps.append(t);
+        }
         x["transports"] = tps;
         networks.append(x);
     }
@@ -307,6 +319,50 @@ public:
     std::shared_ptr<bb::Processor> ptr;
     bb::Processor &proc;
 };
+
+// Calls a Python progress callback from a library thread (only real progress, not the polls)
+Scan::ProgressFn pyProgress(const py::object &fn)
+{
+    // Ctrl+C cancels: the KeyboardInterrupt stays set and is raised after the scan returns
+    return [fn](double f, const std::string &msg) {
+        py::gil_scoped_acquire gil;
+        if (PyErr_Occurred() || PyErr_CheckSignals() != 0)
+            return false;
+        if (fn.is_none() || (f < 0 && msg.empty()))
+            return true;
+        try {
+            const py::object r = fn(f, msg);
+            return r.is_none() || r.cast<bool>();
+        } catch (py::error_already_set &e) {
+            e.restore(); // raised after the scan
+            return false;
+        }
+    };
+}
+
+py::dict spectrumDict(const SpectrumResult &r)
+{
+    py::list pts, peaks;
+    for (const auto &p : r.points)
+        pts.append(py::make_tuple(p.frequencyMHz, p.level));
+    for (const auto &p : r.peaks)
+        peaks.append(py::dict(py::arg("frequency_mhz") = p.frequencyMHz, py::arg("symbol_rate_ksps") = p.symbolRateKsps,
+                              py::arg("level") = p.level, py::arg("snr_db") = p.snrDb));
+    return py::dict(py::arg("polarization") = r.polarization, py::arg("decibel") = r.decibel, py::arg("points") = pts,
+                    py::arg("peaks") = peaks);
+}
+
+py::dict carrierDict(const BlindScanCarrier &c)
+{
+    return py::dict(py::arg("frequency_mhz") = c.frequencyMHz, py::arg("symbol_rate_ksps") = c.symbolRateKsps,
+                    py::arg("delivery_system") = c.deliverySystem,
+                    py::arg("modulation") = c.modulation >= 0 ? DvbNames::modulation(c.modulation) : std::string(),
+                    py::arg("fec") = c.fec >= 0 ? DvbNames::fec(c.fec) : std::string(), py::arg("isis") = c.isis,
+                    py::arg("matype") = c.matype,
+                    py::arg("cnr_db") = c.hasCnrDb ? py::object(py::float_(c.cnrDb)) : py::object(py::none()),
+                    py::arg("signal_dbm") = c.hasSignalDbm ? py::object(py::float_(c.signalDbm)) : py::object(py::none()),
+                    py::arg("tuning") = c.tuning, py::arg("description") = c.describe());
+}
 
 } // namespace
 
@@ -586,6 +642,18 @@ PYBIND11_MODULE(tbsdvb, m)
         .def("set_status_interval", [](PyReceiver &r, int ms) { r.rx.setStatusInterval(ms); })
         .def("set_preview_enabled", [](PyReceiver &r, bool on) { r.rx.setPreviewEnabled(on); })
         .def("set_preview_stream", [](PyReceiver &r, int isi) { r.rx.setPreviewStream(isi); })
+        .def("set_constellation_samples", [](PyReceiver &r, int n) { r.rx.setConstellationSamples(n); },
+             "Read N IQ samples with each status update (0 = off); needs the neumoDVB driver")
+        .def("constellation", [](PyReceiver &r) -> py::object {
+            bool supported = true;
+            const auto iq = r.rx.constellation(&supported);
+            if (!supported)
+                return py::none();
+            py::list out;
+            for (const auto &s : iq)
+                out.append(py::make_tuple(static_cast<int>(s.i), static_cast<int>(s.q)));
+            return out;
+        }, "Latest IQ samples as (i, q) tuples, None if the device cannot deliver them")
         .def("attach_processor", [](PyReceiver &r, PyProcessor *p) { r.processor = p ? p->ptr : nullptr; },
              py::arg("processor"), "Feed this Processor from the capture threads (set before start)")
         .def("attach_monitor", [](PyReceiver &r, std::shared_ptr<Monitor> m) { r.monitor = std::move(m); },
@@ -696,6 +764,146 @@ PYBIND11_MODULE(tbsdvb, m)
             return py::make_tuple(std::string(bb::captureFormatName(fmt)), snapshotDict(snap), bb::formatXmltv(all));
         },
         py::arg("path"), py::arg("config") = bb::ProcessorConfig());
+
+    // ---- Spectrum, blind scan, network scan ----
+    py::enum_<SpectrumMethod>(m, "SpectrumMethod").value("Sweep", SpectrumMethod::Sweep).value("Fft", SpectrumMethod::Fft);
+    m.def(
+        "scan_capabilities",
+        [](const DeviceSelection &dev) {
+            ScanCapabilities c;
+            {
+                py::gil_scoped_release release;
+                c = Scan::capabilities(dev);
+            }
+            return py::dict(py::arg("probed") = c.probed, py::arg("neumo_api") = c.neumoApi,
+                            py::arg("spectrum_sweep") = c.spectrumSweep, py::arg("spectrum_fft") = c.spectrumFft,
+                            py::arg("blind_scan") = c.blindScan, py::arg("constellation") = c.constellation,
+                            py::arg("note") = c.note);
+        },
+        py::arg("device"), "What the driver supports (spectrum, blind scan, IQ); opens the frontend briefly");
+    m.def(
+        "spectrum",
+        [](const DeviceSelection &dev, double start, double end, const TuningParams &lnb, SpectrumMethod method,
+           int resolution, int fft, const py::object &progress) {
+            SpectrumRequest req;
+            req.startMHz = start;
+            req.endMHz = end;
+            req.lnb = lnb;
+            req.method = method;
+            req.resolutionKHz = resolution;
+            req.fftSize = fft;
+            SpectrumResult res;
+            std::string err;
+            bool ok;
+            {
+                py::gil_scoped_release release;
+                ok = Scan::spectrum(dev, req, &res, &err, pyProgress(progress));
+            }
+            if (PyErr_Occurred())
+                throw py::error_already_set();
+            if (!ok)
+                throw std::runtime_error(err);
+            return spectrumDict(res);
+        },
+        py::arg("device"), py::arg("start_mhz"), py::arg("end_mhz"), py::arg("lnb") = TuningParams(),
+        py::arg("method") = SpectrumMethod::Fft, py::arg("resolution_khz") = 0, py::arg("fft_size") = 512,
+        py::arg("progress") = py::none(),
+        "RF spectrum (neumoDVB driver). lnb gives LNB type, polarization and DiSEqC; progress(fraction, message) -> bool");
+    m.def(
+        "blind_scan",
+        [](const DeviceSelection &dev, double start, double end, const TuningParams &lnb, int maxSr,
+           const py::object &progress, const py::object &onCarrier) {
+            BlindScanRequest req;
+            req.startMHz = start;
+            req.endMHz = end;
+            req.lnb = lnb;
+            req.maxSymbolRateKsps = maxSr;
+            std::vector<BlindScanCarrier> found;
+            std::string err;
+            bool ok;
+            {
+                py::gil_scoped_release release;
+                ok = Scan::blindScan(dev, req, &found, &err, pyProgress(progress), [&](const BlindScanCarrier &c) {
+                    if (onCarrier.is_none())
+                        return;
+                    py::gil_scoped_acquire gil;
+                    if (PyErr_Occurred())
+                        return;
+                    try {
+                        onCarrier(carrierDict(c));
+                    } catch (py::error_already_set &e) {
+                        e.restore();
+                    }
+                });
+            }
+            if (PyErr_Occurred())
+                throw py::error_already_set();
+            if (!ok)
+                throw std::runtime_error(err);
+            py::list out;
+            for (const auto &c : found)
+                out.append(carrierDict(c));
+            return out;
+        },
+        py::arg("device"), py::arg("start_mhz"), py::arg("end_mhz"), py::arg("lnb") = TuningParams(),
+        py::arg("max_symbol_rate_ksps") = 45000, py::arg("progress") = py::none(), py::arg("on_carrier") = py::none(),
+        "Finds and locks the carriers in a range (neumoDVB driver); returns a list of dicts with a ready 'tuning'");
+    m.def(
+        "network_scan",
+        [](PyReceiver &rx, PyProcessor &proc, const std::vector<TuningParams> &seeds, bool followNit, bool nitOther,
+           bool allPositions, int lockTimeoutMs, int tableTimeoutMs, const py::object &progress) {
+            bb::NetworkScanOptions opt;
+            opt.followNit = followNit;
+            opt.includeNitOther = nitOther;
+            opt.sameOrbitalPosition = !allPositions;
+            opt.lockTimeoutMs = lockTimeoutMs;
+            opt.tableTimeoutMs = tableTimeoutMs;
+            if (rx.processor != proc.ptr)
+                throw std::runtime_error("attach the processor to the receiver (attach_processor) before starting it");
+            bb::NetworkScanResult r;
+            {
+                py::gil_scoped_release release;
+                std::atomic<bool> cancel{false};
+                r = bb::runNetworkScan(
+                    rx.rx, proc.proc, seeds, opt,
+                    [&](const bb::NetworkScanProgress &p) {
+                        py::gil_scoped_acquire gil;
+                        if (PyErr_Occurred() || PyErr_CheckSignals() != 0) {
+                            cancel = true;
+                            return;
+                        }
+                        if (progress.is_none())
+                            return;
+                        try {
+                            progress(p.index, p.total, p.message);
+                        } catch (py::error_already_set &e) {
+                            e.restore();
+                            cancel = true;
+                        }
+                    },
+                    {}, &cancel);
+            }
+            if (PyErr_Occurred())
+                throw py::error_already_set();
+            py::list tps;
+            for (const auto &t : r.transponders) {
+                py::list services;
+                for (const auto &sv : t.services)
+                    services.append(py::dict(py::arg("service_id") = sv.serviceId, py::arg("name") = sv.name,
+                                             py::arg("provider") = sv.provider, py::arg("type") = sv.typeName,
+                                             py::arg("scrambled") = sv.scrambled));
+                tps.append(py::dict(py::arg("tuning") = t.tuning, py::arg("locked") = t.locked,
+                                    py::arg("tables_complete") = t.tablesComplete, py::arg("tsid") = t.tsid,
+                                    py::arg("onid") = t.onid, py::arg("delivery") = t.delivery,
+                                    py::arg("services") = services));
+            }
+            return py::dict(py::arg("network_id") = r.networkId, py::arg("network_name") = r.networkName,
+                            py::arg("transponders") = tps, py::arg("text") = bb::formatNetworkScan(r));
+        },
+        py::arg("receiver"), py::arg("processor"), py::arg("seeds"), py::arg("follow_nit") = true,
+        py::arg("nit_other") = false, py::arg("all_positions") = false, py::arg("lock_timeout_ms") = 4000,
+        py::arg("table_timeout_ms") = 12000, py::arg("progress") = py::none(),
+        "Tunes the running receiver to each seed and every transport its NIT lists; collects the services");
 
     // ---- TS filter ----
     py::class_<TsFilter>(m, "TsFilter", "Whole TS (nulls dropped), a PID list, or one service as an SPTS")
