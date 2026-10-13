@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Scan.h"
 #include "Status.h"
 #include "Types.h"
 #include "export.h"
@@ -39,6 +40,15 @@ public:
 
     virtual uint64_t overflows() const { return 0; }
     virtual bool atEnd() const { return false; }
+    // IQ samples of the locked carrier (needs driver support, see Scan.h)
+    virtual bool readConstellation(std::vector<ConstellationSample> *out, int maxSamples, std::string *error)
+    {
+        (void)out;
+        (void)maxSamples;
+        if (error)
+            *error = "Constellation display is not supported by this device";
+        return false;
+    }
 
     void setLogger(LogFn fn) { m_log = std::move(fn); }
 

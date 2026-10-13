@@ -9,6 +9,7 @@ option(TBSBBPROC_BUILD_SHARED "Build tbsbbproc as a shared library" ${TBSDVB_BUI
 set(TBSBBPROC_PUBLIC_HEADERS
     include/tbsbbproc/export.h
     include/tbsbbproc/Processor.h
+    include/tbsbbproc/NetworkScan.h
     include/tbsbbproc/PsiTypes.h
     include/tbsbbproc/TsTableAnalyzer.h
     include/tbsbbproc/Gse.h
@@ -32,6 +33,7 @@ set(TBSBBPROC_SOURCES
     src/Report.cpp
     src/Mpe.cpp
     src/Xmltv.cpp
+    src/NetworkScan.cpp
     src/TunWriter.cpp
 )
 

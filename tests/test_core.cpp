@@ -12,9 +12,11 @@
 #include "tbsdvb/Types.h"
 
 #include "tbsdvb/Receiver.h"
+#include "tbsdvb/Scan.h"
 #include "tbsdvb/Sink.h"
 
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <filesystem>
 #include <fstream>
@@ -1126,6 +1128,64 @@ static void testFileSegments()
     fs::remove_all(dir);
 }
 
+static void testScanHelpers()
+{
+    TuningParams lnb; // universal 9750/10600, switch 11700
+    auto segs = Scan::bandSegments(lnb, 10700, 12750);
+    CHECK_EQ(segs.size(), 2u);
+    if (segs.size() == 2) {
+        CHECK_EQ(segs[0].ifStartKHz, 950000u);
+        CHECK_EQ(segs[0].ifEndKHz, 1950000u);
+        CHECK(!segs[0].tuning.toneOn());
+        CHECK_EQ(segs[1].ifStartKHz, 1100000u);
+        CHECK_EQ(segs[1].ifEndKHz, 2150000u);
+        CHECK(segs[1].tuning.toneOn());
+        CHECK(std::fabs(Scan::ifToRfMHz(segs[1].tuning, 1453000) - 12053.0) < 1e-6);
+    }
+    CHECK_EQ(Scan::bandSegments(lnb, 11800, 12000).size(), 1u);
+    CHECK(Scan::bandSegments(lnb, 11800, 12000)[0].tuning.toneOn());
+    CHECK(Scan::bandSegments(lnb, 11000, 11000).empty());
+
+    // C band: LO 5150 above the band inverts the spectrum
+    TuningParams c;
+    c.lnbType = LnbType::SingleLo;
+    c.lnbLo1MHz = 5150;
+    segs = Scan::bandSegments(c, 3400, 4200);
+    CHECK_EQ(segs.size(), 1u);
+    if (!segs.empty()) {
+        CHECK_EQ(segs[0].ifStartKHz, 950000u);
+        CHECK_EQ(segs[0].ifEndKHz, 1750000u);
+        CHECK(std::fabs(Scan::ifToRfMHz(segs[0].tuning, 1000000) - 4150.0) < 1e-6);
+    }
+
+    // Peaks: two carriers 10 dB over a flat floor, separated by a dip to the floor
+    std::vector<SpectrumPoint> pts;
+    for (int k = 0; k <= 1000; ++k) {
+        const double f = 11000 + k * 0.1;
+        double lv = -70;
+        if (f >= 11020 && f <= 11040)
+            lv = -60;
+        if (f >= 11060 && f <= 11087.5)
+            lv = -58;
+        pts.push_back({f, lv});
+    }
+    const auto peaks = Scan::findPeaks(pts);
+    CHECK_EQ(peaks.size(), 2u);
+    if (peaks.size() == 2) {
+        CHECK(std::fabs(peaks[0].frequencyMHz - 11030) < 0.3);
+        CHECK(std::fabs(peaks[0].symbolRateKsps - 20000) < 600);
+        CHECK(std::fabs(peaks[1].frequencyMHz - 11073.75) < 0.3);
+        CHECK(std::fabs(peaks[1].snrDb - 12) < 0.5);
+    }
+    // Replay devices have no spectrum support
+    DeviceSelection replay;
+    replay.kind = DeviceKind::FileReplay;
+    SpectrumResult res;
+    std::string err;
+    CHECK(!Scan::spectrum(replay, SpectrumRequest(), &res, &err));
+    CHECK(!err.empty());
+}
+
 int main()
 {
     testCrc8();
@@ -1146,6 +1206,7 @@ int main()
     testReceiverNetworkOutput();
     testPreviewStream();
     testMonitor();
+    testScanHelpers();
 #if defined(TBS_TEST_LINUX_INTERNALS)
     testLinuxDiagnostics();
 #endif

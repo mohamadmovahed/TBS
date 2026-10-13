@@ -60,6 +60,18 @@ std::vector<Bytes> siPackets(uint16_t tsid, uint16_t onid, uint16_t program, std
     addDescriptor(td, 0x41, {static_cast<uint8_t>(program >> 8), static_cast<uint8_t>(program), 0x19});
     put16(ts, static_cast<uint16_t>(0xF000 | td.size()));
     ts.insert(ts.end(), td.begin(), td.end());
+    // Other transports of the network (for the NIT scan): 11053 H, 11817 H, 12187 V at 13.0E
+    auto other = [&](uint16_t id, const Bytes &sat) {
+        put16(ts, id);
+        put16(ts, onid);
+        Bytes od;
+        addDescriptor(od, 0x43, sat);
+        put16(ts, static_cast<uint16_t>(0xF000 | od.size()));
+        ts.insert(ts.end(), od.begin(), od.end());
+    };
+    other(static_cast<uint16_t>(tsid + 1), {0x01, 0x10, 0x53, 0x00, 0x01, 0x30, 0x80 | 0x10 | 0x04 | 0x02, 0x02, 0x75, 0x00, 0x02});
+    other(static_cast<uint16_t>(tsid + 2), {0x01, 0x18, 0x17, 0x00, 0x01, 0x30, 0x80 | 0x10 | 0x04 | 0x02, 0x02, 0x75, 0x00, 0x03});
+    other(static_cast<uint16_t>(tsid + 3), {0x01, 0x21, 0x87, 0x00, 0x01, 0x30, 0x80 | 0x20 | 0x04 | 0x01, 0x02, 0x75, 0x00, 0x03});
     put16(nit, static_cast<uint16_t>(0xF000 | ts.size()));
     nit.insert(nit.end(), ts.begin(), ts.end());
     add(makeSection(0x40, 0x0100, 1, nit), 0x0010, 0);

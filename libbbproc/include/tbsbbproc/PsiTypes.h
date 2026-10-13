@@ -88,11 +88,30 @@ struct TBSBBPROC_API ServiceInfo
     EventInfo following;
 };
 
+// Satellite delivery system descriptor (0x43) and S2 satellite delivery descriptor (0x79)
+struct TBSBBPROC_API SatelliteDelivery
+{
+    bool valid = false;
+    double frequencyMHz = 0.0;
+    double orbitalPositionDeg = 0.0;
+    bool east = true;
+    int polarization = 0;        // 0 linear horizontal, 1 linear vertical, 2 circular left, 3 circular right
+    bool s2 = false;
+    int rolloff = 0;             // 0 = 0.35, 1 = 0.25, 2 = 0.20
+    int modulation = 0;          // 0 auto, 1 QPSK, 2 8PSK, 3 16QAM
+    double symbolRateKsps = 0.0;
+    int fecInner = 0;            // EN 300 468 table 35 (1 = 1/2 ... 9 = 9/10, 15 = none)
+    int inputStreamId = -1;      // from the S2 descriptor (multistream)
+    bool hasPls = false;
+    uint32_t plsGold = 0;        // scrambling sequence index (gold code)
+};
+
 struct TBSBBPROC_API TransportInfo
 {
     uint16_t tsid = 0;
     uint16_t onid = 0;
     std::string delivery; // human readable delivery system descriptor
+    SatelliteDelivery sat;
     std::vector<uint16_t> serviceIds;
 };
 

@@ -6,15 +6,28 @@
 #include "tbsbbproc/CaptureFile.h"
 #include "tbsbbproc/DvbText.h"
 #include "tbsbbproc/Gse.h"
+#include "tbsbbproc/NetworkScan.h"
 #include "tbsbbproc/Processor.h"
 #include "tbsbbproc/TsTableAnalyzer.h"
+#include "tbsdvb/TsAnalyzer.h"
 
+#include <atomic>
+#include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <cstring>
 #include <string>
 
 using builders::Bytes;
 using namespace tbs::bb;
+using tbs::DeliverySystem;
+using tbs::DeviceKind;
+using tbs::ModulationHint;
+using tbs::Polarization;
+using tbs::Receiver;
+using tbs::ReceiverConfig;
+using tbs::TuningParams;
 
 static int g_failures = 0;
 
@@ -268,6 +281,28 @@ static void testPsi()
             CHECK(d.find("8PSK 3/4") != std::string::npos);
             CHECK(d.find("13.0°E") != std::string::npos);
             CHECK(d.find("ISI 3") != std::string::npos);
+            const SatelliteDelivery &sd = n.transports[0].sat;
+            CHECK(sd.valid);
+            CHECK(std::fabs(sd.frequencyMHz - 11494.0) < 1e-6);
+            CHECK(std::fabs(sd.symbolRateKsps - 27500.0) < 1e-6);
+            CHECK(std::fabs(sd.orbitalPositionDeg - 13.0) < 1e-6);
+            CHECK(sd.east && sd.s2);
+            CHECK_EQ(sd.polarization, 0);
+            CHECK_EQ(sd.modulation, 2);
+            CHECK_EQ(sd.fecInner, 3);
+            CHECK_EQ(sd.inputStreamId, 3);
+            TuningParams lnb;
+            lnb.diseqcPort = 2;
+            const auto tunings = tuningFromNetwork(n, lnb);
+            CHECK_EQ(tunings.size(), 1u);
+            if (!tunings.empty()) {
+                CHECK(std::fabs(tunings[0].frequencyMHz - 11494.0) < 1e-6);
+                CHECK(tunings[0].polarization == Polarization::HorizontalLeft18V);
+                CHECK(tunings[0].deliverySystem == DeliverySystem::DvbS2);
+                CHECK(tunings[0].modulation == ModulationHint::Psk8);
+                CHECK_EQ(tunings[0].inputStreamId, 3);
+                CHECK_EQ(tunings[0].diseqcPort, 2);
+            }
         }
     }
     CHECK_EQ(r.emm.size(), 1u);
@@ -294,6 +329,117 @@ static void testPsi()
     const TsReport r3 = a.report();
     CHECK_EQ(r3.crcErrors, 3u);
     CHECK_EQ(r3.tsid, 0x0457);
+}
+
+// NIT listing this transport and three more: two at 13.0E, one at 19.2E
+static std::vector<Bytes> buildScanNitPackets()
+{
+    using namespace builders;
+    std::vector<Bytes> pk;
+    uint8_t cc = 8;
+    Bytes nit, nd;
+    addDescriptor(nd, 0x40, dvbString("Test Net"));
+    put16(nit, static_cast<uint16_t>(0xF000 | nd.size()));
+    nit.insert(nit.end(), nd.begin(), nd.end());
+    Bytes loop;
+    auto transport = [&](uint16_t tsid, const Bytes &sat, const Bytes &s2 = {}) {
+        put16(loop, tsid);
+        put16(loop, 0x0001);
+        Bytes td;
+        addDescriptor(td, 0x43, sat);
+        if (!s2.empty())
+            addDescriptor(td, 0x79, s2);
+        put16(loop, static_cast<uint16_t>(0xF000 | td.size()));
+        loop.insert(loop.end(), td.begin(), td.end());
+    };
+    // this one: 11494 MHz H, ISI 3
+    transport(0x0457, {0x01, 0x14, 0x94, 0x00, 0x01, 0x30, 0x80 | 0x00 | 0x04 | 0x02, 0x02, 0x75, 0x00, 0x03}, {0x40, 0x03});
+    // 11053 MHz H 27.5 MS/s DVB-S2 QPSK, 13.0E
+    transport(0x0458, {0x01, 0x10, 0x53, 0x00, 0x01, 0x30, 0x80 | 0x00 | 0x04 | 0x01, 0x02, 0x75, 0x00, 0x03});
+    // 12603 MHz V 30 MS/s DVB-S, 13.0E
+    transport(0x0459, {0x01, 0x26, 0x03, 0x00, 0x01, 0x30, 0x80 | 0x20 | 0x01, 0x03, 0x00, 0x00, 0x04});
+    // 11720 MHz H at 19.2E: another satellite
+    transport(0x0460, {0x01, 0x17, 0x20, 0x00, 0x01, 0x92, 0x80 | 0x00 | 0x01, 0x02, 0x75, 0x00, 0x03});
+    put16(nit, static_cast<uint16_t>(0xF000 | loop.size()));
+    nit.insert(nit.end(), loop.begin(), loop.end());
+    for (auto &p : sectionToTs(makeSection(0x40, 0x0022, 3, nit), 0x0010, cc))
+        pk.push_back(p);
+    return pk;
+}
+
+static void testNetworkScan()
+{
+    const std::string file = (std::filesystem::temp_directory_path() / "tbs_nit_scan.ts").string();
+    {
+        std::ofstream f(file, std::ios::binary);
+        std::vector<Bytes> pk;
+        for (const Bytes &p : buildSiPackets())
+            if (tbs::TsAnalyzer::pidOf(p.data()) != 0x0010) // replaced by the scan NIT
+                pk.push_back(p);
+        for (const Bytes &p : buildScanNitPackets())
+            pk.push_back(p);
+        for (int rep = 0; rep < 20; ++rep)
+            for (const Bytes &p : pk)
+                f.write(reinterpret_cast<const char *>(p.data()), 188);
+    }
+    Processor proc;
+    Receiver rx;
+    Receiver::Callbacks cb;
+    cb.onTsPackets = [&](const uint8_t *p, size_t n) { proc.pushTs(p, n); };
+    rx.setCallbacks(cb);
+    rx.setStatusInterval(100);
+    ReceiverConfig cfg;
+    cfg.device.kind = DeviceKind::FileReplay;
+    cfg.device.replayFile = file;
+    cfg.device.replayRateMbps = 1.0;
+    cfg.device.replayLoop = true;
+    cfg.tuning.frequencyMHz = 11494;
+    cfg.tuning.symbolRateKsps = 27500;
+    cfg.tuning.inputStreamId = 3;
+    CHECK(rx.start(cfg));
+
+    int progressCalls = 0;
+    int transponderCalls = 0;
+    NetworkScanOptions opt;
+    opt.tableTimeoutMs = 4000;
+    const NetworkScanResult r = runNetworkScan(
+        rx, proc, {cfg.tuning}, opt, [&](const NetworkScanProgress &) { ++progressCalls; },
+        [&](const ScannedTransponder &) { ++transponderCalls; });
+    rx.stop();
+    std::filesystem::remove(file);
+
+    CHECK_EQ(r.transponders.size(), 3u); // seed + two more at 13.0E; 19.2E skipped
+    CHECK_EQ(transponderCalls, 3);
+    CHECK(progressCalls >= 4);
+    CHECK_STR(r.networkName, "Test Net");
+    CHECK_EQ(r.networkId, 0x22);
+    CHECK(!r.cancelled);
+    if (r.transponders.size() == 3) {
+        const ScannedTransponder &t0 = r.transponders[0];
+        CHECK(t0.locked && t0.tablesComplete);
+        CHECK_EQ(t0.tsid, 0x0457);
+        CHECK_EQ(t0.services.size(), 2u);
+        CHECK(t0.delivery.find("11494.000") != std::string::npos);
+        CHECK(std::fabs(r.transponders[1].tuning.frequencyMHz - 11053.0) < 1e-6);
+        CHECK(r.transponders[1].tuning.modulation == ModulationHint::Qpsk);
+        CHECK(std::fabs(r.transponders[2].tuning.frequencyMHz - 12603.0) < 1e-6);
+        CHECK(r.transponders[2].tuning.polarization == Polarization::VerticalRight13V);
+        CHECK(r.transponders[2].tuning.deliverySystem == DeliverySystem::DvbS);
+        CHECK(std::fabs(r.transponders[2].tuning.symbolRateKsps - 30000.0) < 1e-6);
+        CHECK_EQ(r.transponders[2].tuning.inputStreamId, -1);
+    }
+    CHECK_EQ(r.serviceCount(), 6u);
+    const std::string text = formatNetworkScan(r);
+    CHECK(text.find("3 transponders, 6 services") != std::string::npos);
+    CHECK(text.find("Radio 20") != std::string::npos);
+
+    // Cancel before the first transponder
+    std::atomic<bool> cancel{true};
+    CHECK(rx.start(cfg));
+    const NetworkScanResult rc = runNetworkScan(rx, proc, {cfg.tuning}, opt, {}, {}, &cancel);
+    rx.stop();
+    CHECK(rc.cancelled);
+    CHECK(rc.transponders.empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -786,6 +932,7 @@ int main()
 {
     testDvbText();
     testPsi();
+    testNetworkScan();
     testGse(false);
     testGse(true);
     testGseErrors();

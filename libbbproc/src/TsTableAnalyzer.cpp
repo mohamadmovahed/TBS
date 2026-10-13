@@ -82,28 +82,43 @@ void forEachDescriptor(const uint8_t *p, size_t len, Fn fn)
     }
 }
 
-std::string satelliteDelivery(const uint8_t *d, size_t len)
+SatelliteDelivery parseSatelliteDelivery(const uint8_t *d, size_t len)
 {
+    SatelliteDelivery sd;
     if (len < 11)
+        return sd;
+    sd.valid = true;
+    // 8 BCD digits, decimal point after the third: 011.75725 GHz
+    sd.frequencyMHz = (bcd(d[0]) * 10.0 + bcd(d[1]) / 10.0 + bcd(d[2]) / 1000.0 + bcd(d[3]) / 100000.0) * 1000.0;
+    sd.orbitalPositionDeg = bcd(d[4]) * 10.0 + bcd(d[5]) / 10.0;
+    sd.east = d[6] & 0x80;
+    sd.polarization = (d[6] >> 5) & 3;
+    sd.s2 = d[6] & 0x04;
+    sd.rolloff = sd.s2 ? (d[6] >> 3) & 3 : 0;
+    sd.modulation = d[6] & 3;
+    sd.symbolRateKsps = (bcd(d[7]) * 10.0 + bcd(d[8]) / 10.0 + bcd(d[9]) / 1000.0 + (d[10] >> 4) / 10000.0) * 1000.0;
+    sd.fecInner = d[10] & 0x0F;
+    return sd;
+}
+
+std::string satelliteDeliveryText(const SatelliteDelivery &sd)
+{
+    if (!sd.valid)
         return {};
     char buf[160];
-    // 8 BCD digits, decimal point after the third: 011.75725 GHz
-    const double freqGHz = bcd(d[0]) * 10.0 + bcd(d[1]) / 10.0 + bcd(d[2]) / 1000.0 + bcd(d[3]) / 100000.0;
-    const double orbital = bcd(d[4]) * 10.0 + bcd(d[5]) / 10.0;
-    const bool east = d[6] & 0x80;
     static const char *const pol[] = {"H", "V", "L", "R"};
     static const char *const ro[] = {"0.35", "0.25", "0.20", "?"};
-    const bool s2 = d[6] & 0x04;
     static const char *const mod[] = {"auto", "QPSK", "8PSK", "16QAM"};
-    const double srMsym = bcd(d[7]) * 10.0 + bcd(d[8]) / 10.0 + bcd(d[9]) / 1000.0 + (d[10] >> 4) / 10000.0;
     static const char *const fec[] = {"?", "1/2", "2/3", "3/4", "5/6", "7/8", "8/9", "3/5", "4/5", "9/10", "?", "?", "?", "?", "?", "none"};
-    std::snprintf(buf, sizeof(buf), "%s %.3f MHz %s, %.3f MS/s, %s %s%s%s, %.1f°%c", s2 ? "DVB-S2" : "DVB-S",
-                  freqGHz * 1000.0, pol[(d[6] >> 5) & 3], srMsym, mod[d[6] & 3], fec[d[10] & 0x0F],
-                  s2 ? ", RO " : "", s2 ? ro[(d[6] >> 3) & 3] : "", orbital, east ? 'E' : 'W');
+    std::snprintf(buf, sizeof(buf), "%s %.3f MHz %s, %.3f MS/s, %s %s%s%s, %.1f°%c", sd.s2 ? "DVB-S2" : "DVB-S",
+                  sd.frequencyMHz, pol[sd.polarization & 3], sd.symbolRateKsps / 1000.0, mod[sd.modulation & 3],
+                  fec[sd.fecInner & 0x0F], sd.s2 ? ", RO " : "", sd.s2 ? ro[sd.rolloff & 3] : "", sd.orbitalPositionDeg,
+                  sd.east ? 'E' : 'W');
     return buf;
 }
 
-std::string s2Delivery(const uint8_t *d, size_t len)
+// S2 satellite delivery descriptor: PLS and ISI into sd, text appended to the description
+std::string s2Delivery(const uint8_t *d, size_t len, SatelliteDelivery &sd)
 {
     if (len < 1)
         return {};
@@ -111,11 +126,15 @@ std::string s2Delivery(const uint8_t *d, size_t len)
     size_t i = 1;
     if ((d[0] & 0x80) && len >= i + 3) {
         const uint32_t gold = ((d[i] & 0x03u) << 16) | (d[i + 1] << 8) | d[i + 2];
+        sd.hasPls = true;
+        sd.plsGold = gold;
         out += ", PLS gold " + std::to_string(gold);
         i += 3;
     }
-    if ((d[0] & 0x40) && len >= i + 1)
+    if ((d[0] & 0x40) && len >= i + 1) {
+        sd.inputStreamId = d[i];
         out += ", ISI " + std::to_string(d[i]);
+    }
     return out;
 }
 
@@ -439,11 +458,22 @@ void TsTableAnalyzer::parseNitBat(const uint8_t *s, size_t len, bool bat, int ve
         std::string s2extra;
         forEachDescriptor(s + i + 6, tdl, [&](uint8_t tag, const uint8_t *d, size_t dl) {
             switch (tag) {
-            case 0x43:
-                t.delivery = satelliteDelivery(d, dl);
+            case 0x43: {
+                const SatelliteDelivery sd = parseSatelliteDelivery(d, dl);
+                if (sd.valid) {
+                    const int isi = t.sat.inputStreamId;
+                    const bool hasPls = t.sat.hasPls;
+                    const uint32_t gold = t.sat.plsGold;
+                    t.sat = sd; // keep what an earlier S2 descriptor set
+                    t.sat.inputStreamId = isi;
+                    t.sat.hasPls = hasPls;
+                    t.sat.plsGold = gold;
+                }
+                t.delivery = satelliteDeliveryText(sd);
                 break;
+            }
             case 0x79:
-                s2extra = s2Delivery(d, dl);
+                s2extra = s2Delivery(d, dl, t.sat);
                 break;
             case 0x44:
                 if (t.delivery.empty())

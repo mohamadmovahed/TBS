@@ -91,6 +91,19 @@ if(TBS_BUILD_TESTS)
     endif()
     add_test(NAME tbsdvb-core COMMAND tbs-tests)
 
+    # Spectrum / blind scan / constellation against a simulated neumoDVB frontend
+    # (LD_PRELOAD shim; sanitizer runtimes must come first in LD_PRELOAD, so not with those)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CXX_FLAGS MATCHES "sanitize")
+        add_library(tbs-fake-frontend SHARED tests/fake_frontend.cpp)
+        target_link_libraries(tbs-fake-frontend PRIVATE ${CMAKE_DL_LIBS})
+        add_executable(tbs-scan-tests tests/test_scan.cpp)
+        target_link_libraries(tbs-scan-tests PRIVATE TbsDvb::tbsdvb)
+        add_dependencies(tbs-scan-tests tbs-fake-frontend)
+        add_test(NAME tbsdvb-scan COMMAND tbs-scan-tests)
+        set_tests_properties(tbsdvb-scan PROPERTIES
+            ENVIRONMENT "LD_PRELOAD=$<TARGET_FILE:tbs-fake-frontend>")
+    endif()
+
     add_executable(tbs-bbproc-tests tests/test_bbproc.cpp tests/StreamBuilders.h)
     target_link_libraries(tbs-bbproc-tests PRIVATE TbsDvb::tbsbbproc)
     add_test(NAME tbsbbproc COMMAND tbs-bbproc-tests)

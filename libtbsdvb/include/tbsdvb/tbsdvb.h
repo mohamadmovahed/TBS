@@ -10,6 +10,7 @@
 #include "PlsUtil.h"
 #include "Psi.h"
 #include "Receiver.h"
+#include "Scan.h"
 #include "Sink.h"
 #include "Status.h"
 #include "TsAnalyzer.h"

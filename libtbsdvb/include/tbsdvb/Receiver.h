@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Device.h"
+#include "Scan.h"
 #include "Sink.h"
 #include "Status.h"
 #include "Types.h"
@@ -81,6 +82,12 @@ public:
     // BBFrame mode: input stream rebuilt for onPreviewTs (-1 = the first transport stream seen).
     // Thread safe; takes effect with the next BBFrame.
     void setPreviewStream(int isi);
+
+    // Constellation (IQ) samples of the locked carrier, read with the frontend status.
+    // Needs driver support (see Scan.h); 0 = off (default). Thread safe.
+    void setConstellationSamples(int count);
+    // Latest IQ samples. *supported turns false once the device reported it cannot deliver them.
+    std::vector<ConstellationSample> constellation(bool *supported = nullptr) const;
 
     // Latest snapshots (thread safe)
     FrontendStatus status() const;

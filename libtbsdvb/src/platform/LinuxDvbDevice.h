@@ -1,6 +1,7 @@
 #pragma once
 
 #include "tbsdvb/Device.h"
+#include "tbsdvb/Scan.h"
 
 #include <vector>
 
@@ -26,11 +27,27 @@ public:
     FrontendStatus readStatus() override;
     void close() override;
     uint64_t overflows() const override { return m_overflows; }
+    bool readConstellation(std::vector<ConstellationSample> *out, int maxSamples, std::string *error) override;
+
+    // Spectrum / blind scan (neumoDVB driver API, LinuxDvbScan.cpp). The frontend is opened
+    // without tuning; a segment is one LNB setting (see Scan::bandSegments).
+    bool openFrontend(const DeviceSelection &sel, std::string *error);
+    ScanCapabilities scanCapabilities();
+    bool spectrumSegment(const Scan::BandSegment &seg, const SpectrumRequest &req, SpectrumResult *out, std::string *error,
+                         const std::function<bool()> &cancelled);
+    bool blindScanSegment(const Scan::BandSegment &seg, const BlindScanRequest &req, std::vector<BlindScanCarrier> *out,
+                          SpectrumResult *spectrumOut, std::string *error, const std::function<bool()> &cancelled,
+                          const std::function<void(const BlindScanCarrier &, double ifKHz)> &onCarrier);
 
 private:
     bool setupSec(const TuningParams &t, std::string *error);
     void readSignalStatistics(FrontendStatus &st);
     void readTuningParameters(FrontendStatus &st);
+    // Waits for a frontend event; returns its status flags, 0 on timeout, -1 on error/cancel
+    int waitEvent(int timeoutMs, const std::function<bool()> &cancelled);
+    void drainEvents();
+    bool readSpectrum(const Scan::BandSegment &seg, SpectrumResult *out, std::string *error);
+    bool readCarrier(const Scan::BandSegment &seg, BlindScanCarrier *c, double *ifKHz);
 
     DeviceSelection m_sel;
     std::string m_name = "DVB frontend";
@@ -43,6 +60,7 @@ private:
     uint64_t m_lastTotalBits = 0;
     bool m_haveBerCounters = false;
     double m_lastBer = 0.0;
+    int m_constellationState = 0; // 0 unknown, 1 works, -1 unsupported
 };
 
 } // namespace tbs

@@ -27,6 +27,8 @@ struct Receiver::Impl
     std::atomic<bool> stopRequested{false};
     std::atomic<bool> preview{false};
     std::atomic<int> previewIsi{-1};
+    std::atomic<int> iqSamples{0};
+    std::atomic<bool> iqSupported{true};
     std::atomic<ReceiverState> state{ReceiverState::Stopped};
 
     mutable std::mutex mutex; // guards the members below
@@ -35,6 +37,7 @@ struct Receiver::Impl
     StreamStats stats;
     std::string lastError;
     std::optional<TuningParams> pendingTune;
+    std::vector<ConstellationSample> iq;
 
     void log(const std::string &m)
     {
@@ -103,7 +106,9 @@ bool Receiver::start(const ReceiverConfig &cfg)
         d->stats = StreamStats();
         d->lastError.clear();
         d->pendingTune.reset();
+        d->iq.clear();
     }
+    d->iqSupported = true;
     d->stopRequested = false;
     d->state = ReceiverState::Starting;
     d->thread = std::thread(&Impl::run, d.get(), cfg);
@@ -147,6 +152,19 @@ void Receiver::setPreviewStream(int isi)
 void Receiver::setPreviewEnabled(bool on)
 {
     d->preview = on;
+}
+
+void Receiver::setConstellationSamples(int count)
+{
+    d->iqSamples = count < 0 ? 0 : count;
+}
+
+std::vector<ConstellationSample> Receiver::constellation(bool *supported) const
+{
+    if (supported)
+        *supported = d->iqSupported.load();
+    std::lock_guard<std::mutex> lock(d->mutex);
+    return d->iq;
 }
 
 FrontendStatus Receiver::status() const
@@ -451,6 +469,21 @@ void Receiver::Impl::run(ReceiverConfig cfg)
         }
         if (cb.onStatus)
             cb.onStatus(fe);
+
+        const int iqCount = iqSamples.load();
+        if (iqCount > 0 && iqSupported.load()) {
+            std::vector<ConstellationSample> samples;
+            std::string iqErr;
+            if (fe.locked() && device->readConstellation(&samples, iqCount, &iqErr)) {
+                std::lock_guard<std::mutex> lock(mutex);
+                iq.swap(samples);
+            } else if (iqErr.find("not supported") != std::string::npos) {
+                iqSupported = false;
+            } else if (!fe.locked()) {
+                std::lock_guard<std::mutex> lock(mutex);
+                iq.clear();
+            }
+        }
     };
 
     while (!stopRequested.load()) {

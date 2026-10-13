@@ -24,6 +24,7 @@ set(TBSDVB_PUBLIC_HEADERS
     include/tbsdvb/Psi.h
     include/tbsdvb/TsFilter.h
     include/tbsdvb/Monitor.h
+    include/tbsdvb/Scan.h
 )
 
 set(TBSDVB_SOURCES
@@ -39,6 +40,7 @@ set(TBSDVB_SOURCES
     src/Psi.cpp
     src/TsFilter.cpp
     src/Monitor.cpp
+    src/Scan.cpp
     src/TsNetworkSink.cpp
     src/NetSocket.cpp
     src/NetSocket.h
@@ -75,7 +77,8 @@ find_package(Threads REQUIRED)
 target_link_libraries(tbsdvb PUBLIC Threads::Threads)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_sources(tbsdvb PRIVATE src/platform/LinuxDvbDevice.cpp src/platform/LinuxDvbDevice.h)
+    target_sources(tbsdvb PRIVATE src/platform/LinuxDvbDevice.cpp src/platform/LinuxDvbDevice.h
+        src/platform/LinuxDvbScan.cpp)
     target_compile_definitions(tbsdvb PRIVATE TBSDVB_HAVE_LINUX_DVB=1)
 elseif(WIN32)
     target_sources(tbsdvb PRIVATE src/platform/WinBdaDevice.cpp src/platform/WinBdaDevice.h)
