@@ -9,6 +9,8 @@ add_executable(tbs-receiver
     ReceiverPage.cpp ReceiverPage.h
     ReceiverController.cpp ReceiverController.h
     SettingsStore.cpp SettingsStore.h
+    PresetStore.cpp PresetStore.h
+    ScanDialog.cpp ScanDialog.h
     Theme.cpp Theme.h
     panels/FormHelpers.h
     panels/TuningPanel.cpp panels/TuningPanel.h
@@ -21,6 +23,8 @@ add_executable(tbs-receiver
     panels/EpgPanel.cpp panels/EpgPanel.h
     panels/MonitorPanel.cpp panels/MonitorPanel.h
     widgets/HistoryChart.cpp widgets/HistoryChart.h
+    widgets/SpectrumChart.cpp widgets/SpectrumChart.h
+    widgets/ConstellationView.cpp widgets/ConstellationView.h
     widgets/ShareBarDelegate.cpp widgets/ShareBarDelegate.h
     widgets/MetricTile.cpp widgets/MetricTile.h
     widgets/StatusPill.cpp widgets/StatusPill.h

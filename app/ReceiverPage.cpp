@@ -1,5 +1,6 @@
 #include "ReceiverPage.h"
 
+#include "ScanDialog.h"
 #include "SettingsStore.h"
 #include "Theme.h"
 #include "panels/EpgPanel.h"
@@ -12,6 +13,7 @@
 #include "panels/ServicesPanel.h"
 #include "panels/TuningPanel.h"
 #include "video/VideoWidget.h"
+#include "widgets/ConstellationView.h"
 #include "widgets/LockChain.h"
 #include "widgets/MetricTile.h"
 #include "widgets/StatusPill.h"
@@ -147,9 +149,13 @@ ReceiverPage::ReceiverPage(int index, QWidget *parent)
         openGroup(settings);
         SettingsStore::saveMonitor(settings, cfg);
     });
+    m_iqTimer = new QTimer(this);
+    m_iqTimer->setInterval(250);
+    connect(m_iqTimer, &QTimer::timeout, this, &ReceiverPage::updateConstellation);
     connect(m_tabs, &QTabWidget::currentChanged, this, [this]() {
         if (m_tabs->currentWidget() == m_monitorPanel)
             m_monitorPanel->refresh();
+        updateConstellation();
     });
     connect(m_epg, &EpgPanel::watchRequested, this, [this](int isi, int program, int audio) {
         selectPreview(isi, program, audio);
@@ -324,6 +330,7 @@ QWidget *ReceiverPage::buildSidebar()
     });
     connect(m_output, &OutputPanel::videoPreviewToggled, this, &ReceiverPage::setPreview);
     connect(m_tuning, &TuningPanel::diagnoseRequested, this, &ReceiverPage::runDiagnostics);
+    connect(m_tuning, &TuningPanel::scanRequested, this, &ReceiverPage::openScanDialog);
     return side;
 }
 
@@ -457,6 +464,19 @@ QWidget *ReceiverPage::buildMain()
     tabs->addTab(m_monitorPanel, tr("Monitor"));
     tabs->addTab(scrollWrap(m_ip), tr("IP / GSE"));
     tabs->addTab(wrapCard(m_pids), tr("PIDs"));
+    m_constellationTab = new QWidget;
+    {
+        auto *cl = new QHBoxLayout(m_constellationTab);
+        cl->setContentsMargins(0, 12, 0, 0);
+        m_constellation = new ConstellationView;
+        m_constellationHint = hintLabel(tr("IQ samples of the locked carrier, read from the demodulator. "
+                                           "Needs the neumoDVB driver (see README)."));
+        m_constellationHint->setMaximumWidth(260);
+        m_constellationHint->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+        cl->addWidget(m_constellation, 1);
+        cl->addWidget(m_constellationHint, 0, Qt::AlignTop);
+    }
+    tabs->addTab(m_constellationTab, tr("Constellation"));
     m_logTab = wrapCard(m_log);
     tabs->addTab(m_logTab, tr("Log"));
 
@@ -702,6 +722,7 @@ void ReceiverPage::resetMetrics()
 
 void ReceiverPage::onStateChanged(int state, const QString &error)
 {
+    QTimer::singleShot(0, this, &ReceiverPage::updateConstellation); // after m_running follows the state
     const auto s = static_cast<tbs::ReceiverState>(state);
     if (!error.isEmpty()) {
         m_hadError = true;
@@ -847,7 +868,7 @@ void ReceiverPage::showTab(const QString &name)
 {
     static const QStringList names = {QStringLiteral("overview"), QStringLiteral("services"), QStringLiteral("epg"),
                                       QStringLiteral("monitor"), QStringLiteral("ip"), QStringLiteral("pids"),
-                                      QStringLiteral("log")};
+                                      QStringLiteral("constellation"), QStringLiteral("log")};
     const int i = names.indexOf(name.toLower());
     if (i >= 0)
         m_tabs->setCurrentIndex(i);
@@ -1091,4 +1112,62 @@ void ReceiverPage::shutdown()
 {
     saveSettings();
     stopCapture();
+}
+
+// ---------------------------------------------------------------------------
+// Scan dialog and constellation
+// ---------------------------------------------------------------------------
+
+void ReceiverPage::openScanDialog()
+{
+    if (!m_scanDialog) {
+        ScanDialog::Hooks hooks;
+        hooks.config = [this]() { return currentConfig(); };
+        hooks.running = [this]() { return m_running; };
+        hooks.stopReceiver = [this]() { stopCapture(); };
+        hooks.receiver = [this]() { return m_running ? &m_controller->receiver() : nullptr; };
+        hooks.processor = [this]() { return m_running ? m_processor : std::shared_ptr<tbs::bb::Processor>(); };
+        m_scanDialog = new ScanDialog(hooks, m_name, this);
+        m_scanDialog->setAttribute(Qt::WA_DeleteOnClose, false);
+        connect(m_scanDialog, &ScanDialog::tuneRequested, this, &ReceiverPage::tuneTo);
+        connect(m_scanDialog, &ScanDialog::logMessage, this, &ReceiverPage::appendLog);
+    }
+    m_scanDialog->show();
+    m_scanDialog->raise();
+    m_scanDialog->activateWindow();
+}
+
+void ReceiverPage::tuneTo(const tbs::TuningParams &carrier)
+{
+    m_tuning->setCarrier(carrier);
+    if (m_running)
+        applyTuning();
+    else
+        startCapture();
+}
+
+void ReceiverPage::updateConstellation()
+{
+    const bool visible = m_tabs->currentWidget() == m_constellationTab && m_running;
+    m_controller->receiver().setConstellationSamples(visible ? 2048 : 0);
+    if (!visible) {
+        m_iqTimer->stop();
+        if (!m_running)
+            m_constellation->setMessage(tr("Start the receiver to see the constellation"));
+        return;
+    }
+    if (!m_iqTimer->isActive())
+        m_iqTimer->start();
+    bool supported = true;
+    const auto iq = m_controller->receiver().constellation(&supported);
+    if (!supported)
+        m_constellation->setMessage(m_config.device.kind == tbs::DeviceKind::LinuxDvb
+                                        ? tr("This driver cannot deliver IQ samples (needs the neumoDVB driver)")
+                                        : tr("Not available for this receiver type"));
+    else if (!m_lastStatus.locked())
+        m_constellation->setMessage(tr("No lock"));
+    else if (iq.empty())
+        m_constellation->setMessage(tr("Waiting for samples"));
+    else
+        m_constellation->setSamples(iq);
 }

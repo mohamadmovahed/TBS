@@ -25,6 +25,8 @@ public:
     tbs::TuningParams tuning() const;
     // While running only the tuning fields stay editable (they can be applied with retune)
     void setRunning(bool running);
+    // Sets the carrier fields (frequency, symbol rate, standard, polarization, DiSEqC, ISI, PLS)
+    void setCarrier(const tbs::TuningParams &carrier);
 
 public slots:
     void refreshDevices();
@@ -33,10 +35,15 @@ signals:
     void captureModeChanged();
     void tuningEdited();
     void diagnoseRequested();
+    void scanRequested();
 
 private slots:
     void onDeviceChanged();
     void updateDerived();
+    void reloadPresets();
+    void onPresetChosen(int index);
+    void savePreset();
+    void deletePreset();
 
 private:
     void selectDevice(const tbs::DeviceSelection &sel);
@@ -59,6 +66,10 @@ private:
     QDoubleSpinBox *m_replayRate = nullptr;
     QCheckBox *m_replayLoop = nullptr;
 
+    QPushButton *m_scan = nullptr;
+    QComboBox *m_preset = nullptr;
+    QPushButton *m_presetSave = nullptr;
+    QPushButton *m_presetDelete = nullptr;
     QDoubleSpinBox *m_frequency = nullptr;
     QDoubleSpinBox *m_symbolRate = nullptr;
     QComboBox *m_delsys = nullptr;

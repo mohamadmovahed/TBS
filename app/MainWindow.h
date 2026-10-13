@@ -24,6 +24,7 @@ public slots:
     // Forwarded to the current page (command line options)
     void showTab(const QString &name);
     void showSidebar(const QString &name);
+    void openScan();
 
 protected:
     void closeEvent(QCloseEvent *event) override;

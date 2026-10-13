@@ -9,7 +9,9 @@
 #include <QWidget>
 #include <QMap>
 
+class ConstellationView;
 class EpgPanel;
+class ScanDialog;
 class MonitorPanel;
 class IpPanel;
 class LockChain;
@@ -60,8 +62,9 @@ public slots:
     void stopCapture();
     void toggleCapture();
     void applyTuning();
-    // Selects a details tab by name: overview, services, epg, ip, pids, log
+    // Selects a details tab by name: overview, services, epg, monitor, ip, pids, constellation, log
     void showTab(const QString &name);
+    void openScanDialog();
     void showSidebar(const QString &name); // tuning or outputs
 
 signals:
@@ -161,4 +164,13 @@ private:
     std::shared_ptr<tbs::bb::Processor> m_processor;
     QTimer *m_procTimer = nullptr;
     QLabel *m_statusText = nullptr;
+
+    // Scan dialog and constellation tab
+    void tuneTo(const tbs::TuningParams &carrier);
+    void updateConstellation();
+    ScanDialog *m_scanDialog = nullptr;
+    ConstellationView *m_constellation = nullptr;
+    QWidget *m_constellationTab = nullptr;
+    QLabel *m_constellationHint = nullptr;
+    QTimer *m_iqTimer = nullptr;
 };

@@ -2,6 +2,7 @@
 
 #include "../Theme.h"
 #include "FormHelpers.h"
+#include "../PresetStore.h"
 
 #include <tbsdvb/Device.h>
 #include <tbsdvb/PlsUtil.h>
@@ -10,6 +11,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QInputDialog>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -59,11 +61,19 @@ TuningPanel::TuningPanel(QWidget *parent)
     m_diagnose = new QPushButton(tr("Diagnose"));
     m_diagnose->setObjectName(QStringLiteral("Ghost"));
     m_diagnose->setToolTip(tr("Check the driver and device setup for the selected receiver"));
+    m_scan = new QPushButton(tr("Scan…"));
+    m_scan->setObjectName(QStringLiteral("Ghost"));
+    m_scan->setToolTip(tr("Spectrum, blind scan and network (NIT) scan"));
     devRow->addWidget(m_device, 1);
     devRow->addWidget(m_rescan);
-    devRow->addWidget(m_diagnose);
     root->addLayout(devRow);
+    auto *toolRow = new QHBoxLayout;
+    toolRow->addStretch();
+    toolRow->addWidget(m_diagnose);
+    toolRow->addWidget(m_scan);
+    root->addLayout(toolRow);
     connect(m_diagnose, &QPushButton::clicked, this, &TuningPanel::diagnoseRequested);
+    connect(m_scan, &QPushButton::clicked, this, &TuningPanel::scanRequested);
 
     m_dvbBox = new QWidget;
     auto *dvbForm = makeForm();
@@ -120,6 +130,27 @@ TuningPanel::TuningPanel(QWidget *parent)
 
     // ---- Carrier ----
     root->addWidget(Theme::sectionTitle(tr("Carrier")));
+    auto *presetRow = new QHBoxLayout;
+    m_preset = new QComboBox;
+    m_preset->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_preset->setMinimumContentsLength(16);
+    m_preset->setToolTip(tr("Saved carriers (shared by all receivers)"));
+    m_presetSave = new QPushButton(QStringLiteral("+"));
+    m_presetSave->setObjectName(QStringLiteral("Ghost"));
+    m_presetSave->setToolTip(tr("Save the carrier settings as a preset"));
+    m_presetDelete = new QPushButton(QStringLiteral("\u2212"));
+    m_presetDelete->setObjectName(QStringLiteral("Ghost"));
+    m_presetDelete->setToolTip(tr("Delete the selected preset"));
+    for (QPushButton *b : {m_presetSave, m_presetDelete})
+        b->setFixedWidth(34);
+    presetRow->addWidget(m_preset, 1);
+    presetRow->addWidget(m_presetSave);
+    presetRow->addWidget(m_presetDelete);
+    root->addLayout(presetRow);
+    connect(m_preset, qOverload<int>(&QComboBox::activated), this, &TuningPanel::onPresetChosen);
+    connect(m_presetSave, &QPushButton::clicked, this, &TuningPanel::savePreset);
+    connect(m_presetDelete, &QPushButton::clicked, this, &TuningPanel::deletePreset);
+    connect(&PresetStore::instance(), &PresetStore::changed, this, &TuningPanel::reloadPresets);
     auto *carrier = makeForm();
     m_frequency = makeMHz(0, 30000);
     carrier->addRow(keyLabel(tr("Frequency")), m_frequency);
@@ -217,6 +248,64 @@ TuningPanel::TuningPanel(QWidget *parent)
     connect(m_captureMode, qOverload<int>(&QComboBox::currentIndexChanged), this, &TuningPanel::captureModeChanged);
 
     refreshDevices();
+    reloadPresets();
+}
+
+void TuningPanel::reloadPresets()
+{
+    const QString current = m_preset->currentIndex() > 0 ? m_preset->currentText() : QString();
+    const QSignalBlocker block(m_preset);
+    m_preset->clear();
+    const auto list = PresetStore::instance().presets();
+    m_preset->addItem(list.isEmpty() ? tr("No presets — save one or scan") : tr("Presets (%1)").arg(list.size()));
+    for (const auto &p : list)
+        m_preset->addItem(p.name, PresetStore::encode(p));
+    const int i = current.isEmpty() ? 0 : m_preset->findText(current);
+    m_preset->setCurrentIndex(i < 0 ? 0 : i);
+    m_presetDelete->setEnabled(m_preset->currentIndex() > 0);
+}
+
+void TuningPanel::onPresetChosen(int index)
+{
+    m_presetDelete->setEnabled(index > 0);
+    PresetStore::Preset p;
+    if (index <= 0 || !PresetStore::decode(m_preset->itemData(index).toString(), &p))
+        return;
+    setCarrier(p.tuning);
+}
+
+void TuningPanel::setCarrier(const tbs::TuningParams &c)
+{
+    m_frequency->setValue(c.frequencyMHz);
+    m_symbolRate->setValue(c.symbolRateKsps);
+    m_delsys->setCurrentIndex(m_delsys->findData(static_cast<int>(c.deliverySystem)));
+    m_modulation->setCurrentIndex(m_modulation->findData(static_cast<int>(c.modulation)));
+    m_polarization->setCurrentIndex(m_polarization->findData(static_cast<int>(c.polarization)));
+    m_diseqc->setCurrentIndex(m_diseqc->findData(c.diseqcPort));
+    m_isi->setValue(c.inputStreamId);
+    m_plsMode->setCurrentIndex(m_plsMode->findData(static_cast<int>(c.plsMode)));
+    m_plsCode->setValue(static_cast<int>(c.plsCode));
+    updateDerived();
+}
+
+void TuningPanel::savePreset()
+{
+    const tbs::TuningParams t = tuning();
+    bool ok = false;
+    const QString suggestion = m_preset->currentIndex() > 0 ? m_preset->currentText() : PresetStore::defaultName(t);
+    const QString name = QInputDialog::getText(this, tr("Save preset"), tr("Name"), QLineEdit::Normal, suggestion, &ok).trimmed();
+    if (!ok || name.isEmpty())
+        return;
+    PresetStore::instance().save(name, t);
+    m_preset->setCurrentIndex(m_preset->findText(name));
+    m_presetDelete->setEnabled(true);
+}
+
+void TuningPanel::deletePreset()
+{
+    if (m_preset->currentIndex() <= 0)
+        return;
+    PresetStore::instance().remove(m_preset->currentText());
 }
 
 void TuningPanel::refreshDevices()

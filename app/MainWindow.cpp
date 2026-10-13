@@ -191,6 +191,12 @@ void MainWindow::showTab(const QString &name)
         p->showTab(name);
 }
 
+void MainWindow::openScan()
+{
+    if (ReceiverPage *p = currentPage())
+        p->openScanDialog();
+}
+
 void MainWindow::showSidebar(const QString &name)
 {
     if (ReceiverPage *p = currentPage())
