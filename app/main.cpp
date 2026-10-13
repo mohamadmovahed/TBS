@@ -19,7 +19,7 @@ int main(int argc, char *argv[])
     parser.addVersionOption();
     const QCommandLineOption autostart(QStringLiteral("autostart"), QStringLiteral("Start capturing with the last used settings"));
     const QCommandLineOption theme(QStringLiteral("theme"), QStringLiteral("dark or light"), QStringLiteral("theme"));
-    const QCommandLineOption tab(QStringLiteral("tab"), QStringLiteral("Initial details tab: overview, services, ip, pids, log"),
+    const QCommandLineOption tab(QStringLiteral("tab"), QStringLiteral("Initial details tab: overview, services, epg, ip, pids, log"),
                                  QStringLiteral("name"));
     const QCommandLineOption sidebar(QStringLiteral("sidebar"), QStringLiteral("Initial sidebar page: tuning or outputs"),
                                      QStringLiteral("page"));

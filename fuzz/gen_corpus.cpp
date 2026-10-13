@@ -161,6 +161,26 @@ int main(int argc, char **argv)
             out.insert(out.end(), s.begin(), s.begin() + static_cast<std::ptrdiff_t>(n));
         }
         save(root / "psi", "tables", out);
+
+        // EIT schedule with extended event items, content and parental rating (PID 0x0012)
+        Bytes eitOut;
+        builders::EitEventSpec e;
+        e.id = 7;
+        e.start = 1790000000;
+        e.name = builders::dvbString("Film");
+        e.text = builders::dvbString("short");
+        e.extended = {{0x02, 0xC7, 0x20}, {0x02, 0xCE}};
+        e.items = {{"Director", "X"}};
+        e.content = {0x14, 0x91};
+        e.rating = 9;
+        builders::EitEventSpec f = e;
+        f.id = 8;
+        f.start += 3600;
+        const Bytes sch = builders::makeEitSection(0x50, 1, 1, 2, 0, 0, 0, {builders::eitEvent(e), builders::eitEvent(f)});
+        eitOut.push_back(0x04);
+        builders::put16(eitOut, static_cast<uint16_t>(sch.size() - 4));
+        eitOut.insert(eitOut.end(), sch.begin(), sch.end() - 4);
+        save(root / "psi", "eit_schedule", eitOut);
     }
 
     // fuzz_tsfilter: program(2) flags(1) | selector(1) len(2) bytes

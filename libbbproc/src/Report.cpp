@@ -71,6 +71,9 @@ std::string formatReport(const ProcessorSnapshot &s, bool verbose)
                      static_cast<unsigned long long>(st.tsPackets), t.tsid, t.onid,
                      static_cast<unsigned long long>(t.sections), static_cast<unsigned long long>(t.crcErrors),
                      t.hasTime ? utc(t.utcTime).c_str() : "-");
+            if (t.epgEvents)
+                o += fmt("EPG: %llu events (%llu from the EIT schedule)\n", static_cast<unsigned long long>(t.epgEvents),
+                         static_cast<unsigned long long>(t.scheduleEvents));
             for (const auto &n : t.networks)
                 o += fmt("Network %u%s \"%s\": %u transport streams\n", n.networkId, n.actual ? "" : " (other)",
                          n.name.c_str(), static_cast<unsigned>(n.transports.size()));

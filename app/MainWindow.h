@@ -3,7 +3,9 @@
 #include "ReceiverController.h"
 
 #include <QMainWindow>
+#include <QMap>
 
+class EpgPanel;
 class IpPanel;
 class LockChain;
 class QTimer;
@@ -19,6 +21,10 @@ class QStackedWidget;
 class QToolButton;
 class StatusPill;
 class TuningPanel;
+class AudioOutput;
+class AvSync;
+class QComboBox;
+class QSlider;
 class VideoDecoder;
 class VideoWidget;
 
@@ -35,7 +41,7 @@ public slots:
     void stopCapture();
     void toggleCapture();
     void applyTuning();
-    // Selects a details tab by name: overview, services, ip, pids, log
+    // Selects a details tab by name: overview, services, epg, ip, pids, log
     void showTab(const QString &name);
     void showSidebar(const QString &name); // tuning or outputs
 
@@ -51,6 +57,8 @@ private slots:
     void setPreview(bool on);
     void runDiagnostics();
     void refreshProcessing();
+    // Preview selection: input stream, service (0 = first with video), audio PID (-1 default, 0 off)
+    void selectPreview(int isi, int programNumber, int audioPid);
 
 private:
     QWidget *buildHeader();
@@ -62,9 +70,18 @@ private:
     void setRunningUi(bool running);
     void refreshIcons();
     void resetMetrics();
+    void updatePreviewChoices(const tbs::bb::ProcessorSnapshot &snap);
+    void applyPreviewSelection();
 
     ReceiverController *m_controller = nullptr;
     VideoDecoder *m_decoder = nullptr;
+    AudioOutput *m_audio = nullptr;
+    AvSync *m_avsync = nullptr;
+    bool m_audioStarted = false;
+    int m_previewIsi = -1;
+    int m_previewProgram = 0;
+    int m_previewAudioPid = -1;
+    size_t m_previewChoicesSig = 0;
     tbs::ReceiverConfig m_config;
     bool m_running = false;
     bool m_hadError = false;
@@ -88,6 +105,10 @@ private:
 
     // Main area
     VideoWidget *m_video = nullptr;
+    QComboBox *m_previewService = nullptr;
+    QComboBox *m_previewAudio = nullptr;
+    QToolButton *m_muteButton = nullptr;
+    QSlider *m_volume = nullptr;
     LockChain *m_chain = nullptr;
     MetricTile *m_levelTile = nullptr;
     MetricTile *m_cnrTile = nullptr;
@@ -99,6 +120,13 @@ private:
     class QTabWidget *m_tabs = nullptr;
     QWidget *m_logTab = nullptr;
     ServicesPanel *m_services = nullptr;
+    EpgPanel *m_epg = nullptr;
+    struct EpgState
+    {
+        uint64_t version = 0;
+        qint64 fetchedMs = 0;
+    };
+    QMap<int, EpgState> m_epgState;
     IpPanel *m_ip = nullptr;
     std::shared_ptr<tbs::bb::Processor> m_processor;
     QTimer *m_procTimer = nullptr;

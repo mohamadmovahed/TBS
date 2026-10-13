@@ -78,6 +78,9 @@ public:
     void retune(const TuningParams &tuning);
     // Enables/disables onPreviewTs (thread safe).
     void setPreviewEnabled(bool on);
+    // BBFrame mode: input stream rebuilt for onPreviewTs (-1 = the first transport stream seen).
+    // Thread safe; takes effect with the next BBFrame.
+    void setPreviewStream(int isi);
 
     // Latest snapshots (thread safe)
     FrontendStatus status() const;

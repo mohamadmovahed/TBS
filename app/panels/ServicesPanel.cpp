@@ -88,6 +88,21 @@ ServicesPanel::ServicesPanel(QWidget *parent)
     m_tree->setAlternatingRowColors(true);
     m_tree->setUniformRowHeights(true);
     m_tree->setFrameShape(QFrame::NoFrame);
+    m_tree->setToolTip(tr("Double-click a service, or one of its audio streams, to watch it"));
+    connect(m_tree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item, int) {
+        // Keys: svc/<program> and svc/<program>/es<pid>
+        const QStringList parts = item->data(0, Qt::UserRole).toString().split(QLatin1Char('/'));
+        if (parts.size() < 2 || parts[0] != QLatin1String("svc"))
+            return;
+        const int program = parts[1].toInt();
+        int audio = -1;
+        if (parts.size() == 3 && parts[2].startsWith(QLatin1String("es")) && item->text(2) == QLatin1String("Audio"))
+            audio = parts[2].mid(2).toInt();
+        const int idx = m_stream->currentIndex();
+        const int isi = idx >= 0 && idx < static_cast<int>(m_streamIsis.size()) ? m_streamIsis[static_cast<size_t>(idx)] : -1;
+        if (program > 0)
+            emit watchRequested(isi, program, audio);
+    });
     connect(m_tree, &QTreeWidget::itemExpanded, this,
             [this](QTreeWidgetItem *i) { m_expanded.insert(i->data(0, Qt::UserRole).toString()); });
     connect(m_tree, &QTreeWidget::itemCollapsed, this,

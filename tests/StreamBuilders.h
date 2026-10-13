@@ -382,4 +382,101 @@ inline void addDescriptor(Bytes &b, uint8_t tag, const Bytes &data)
     b.insert(b.end(), data.begin(), data.end());
 }
 
+// ---------------------------------------------------------------------------
+// EIT builders
+// ---------------------------------------------------------------------------
+
+// MJD + BCD UTC time (5 bytes)
+inline Bytes dvbUtc(int64_t t)
+{
+    auto bcd = [](int v) { return static_cast<uint8_t>(((v / 10) << 4) | (v % 10)); };
+    Bytes b;
+    const long secs = static_cast<long>(t % 86400);
+    put16(b, static_cast<uint16_t>(40587 + t / 86400));
+    b.push_back(bcd(static_cast<int>(secs / 3600)));
+    b.push_back(bcd(static_cast<int>(secs / 60 % 60)));
+    b.push_back(bcd(static_cast<int>(secs % 60)));
+    return b;
+}
+
+struct EitEventSpec
+{
+    uint16_t id = 0;
+    int64_t start = 0;
+    uint32_t duration = 1800;
+    uint8_t running = 0;
+    std::string lang = "eng";
+    Bytes name;                    // raw DVB strings (may start with a character table selector)
+    Bytes text;
+    std::vector<Bytes> extended;   // raw text pieces, one extended event descriptor each
+    std::vector<std::pair<std::string, std::string>> items; // in the first extended descriptor
+    std::vector<uint8_t> content;  // content nibble bytes
+    uint8_t rating = 0;            // parental rating byte (age - 3)
+};
+
+inline Bytes eitEvent(const EitEventSpec &e)
+{
+    auto bcd = [](int v) { return static_cast<uint8_t>(((v / 10) << 4) | (v % 10)); };
+    Bytes d;
+    Bytes se(e.lang.begin(), e.lang.end());
+    se.push_back(static_cast<uint8_t>(e.name.size()));
+    se.insert(se.end(), e.name.begin(), e.name.end());
+    se.push_back(static_cast<uint8_t>(e.text.size()));
+    se.insert(se.end(), e.text.begin(), e.text.end());
+    addDescriptor(d, 0x4D, se);
+    const size_t n = e.extended.size();
+    for (size_t i = 0; i < n; ++i) {
+        Bytes x;
+        x.push_back(static_cast<uint8_t>((i << 4) | (n - 1)));
+        x.insert(x.end(), e.lang.begin(), e.lang.end());
+        Bytes items;
+        if (i == 0)
+            for (const auto &it : e.items) {
+                items.push_back(static_cast<uint8_t>(it.first.size()));
+                items.insert(items.end(), it.first.begin(), it.first.end());
+                items.push_back(static_cast<uint8_t>(it.second.size()));
+                items.insert(items.end(), it.second.begin(), it.second.end());
+            }
+        x.push_back(static_cast<uint8_t>(items.size()));
+        x.insert(x.end(), items.begin(), items.end());
+        x.push_back(static_cast<uint8_t>(e.extended[i].size()));
+        x.insert(x.end(), e.extended[i].begin(), e.extended[i].end());
+        addDescriptor(d, 0x4E, x);
+    }
+    if (!e.content.empty()) {
+        Bytes c;
+        for (uint8_t v : e.content) {
+            c.push_back(v);
+            c.push_back(0);
+        }
+        addDescriptor(d, 0x54, c);
+    }
+    if (e.rating)
+        addDescriptor(d, 0x55, {'F', 'R', 'A', e.rating});
+    Bytes b;
+    put16(b, e.id);
+    const Bytes t = dvbUtc(e.start);
+    b.insert(b.end(), t.begin(), t.end());
+    b.push_back(bcd(static_cast<int>(e.duration / 3600)));
+    b.push_back(bcd(static_cast<int>(e.duration / 60 % 60)));
+    b.push_back(bcd(static_cast<int>(e.duration % 60)));
+    put16(b, static_cast<uint16_t>((e.running << 13) | d.size()));
+    b.insert(b.end(), d.begin(), d.end());
+    return b;
+}
+
+// EIT section (0x4E/0x4F p/f, 0x50..0x6F schedule) with the given events
+inline Bytes makeEitSection(uint8_t tableId, uint16_t sid, uint16_t tsid, uint16_t onid, uint8_t version,
+                            uint8_t section, uint8_t lastSection, const std::vector<Bytes> &events)
+{
+    Bytes body;
+    put16(body, tsid);
+    put16(body, onid);
+    body.push_back(section); // segment_last_section_number
+    body.push_back(tableId);
+    for (const Bytes &e : events)
+        body.insert(body.end(), e.begin(), e.end());
+    return makeSection(tableId, sid, version, body, section, lastSection);
+}
+
 } // namespace builders

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <tuple>
 
 namespace tbs {
 namespace bb {
@@ -17,6 +18,7 @@ constexpr uint16_t kPidSdt = 0x0011;
 constexpr uint16_t kPidEit = 0x0012;
 constexpr uint16_t kPidTdt = 0x0014;
 constexpr size_t kMaxScheduleEvents = 500000;
+constexpr size_t kMaxEpgEvents = 200000;
 
 inline uint16_t u16(const uint8_t *p)
 {
@@ -144,6 +146,10 @@ void TsTableAnalyzer::reset()
     m_tableStats.clear();
     m_tableInstances.clear();
     m_scheduleSeen.clear();
+    m_epg.clear();
+    m_eitSectionVersions.clear();
+    m_epgCount = 0;
+    m_epgVersion = 0;
 }
 
 bool TsTableAnalyzer::wantsPid(uint16_t pid) const
@@ -224,7 +230,7 @@ void TsTableAnalyzer::onSection(uint16_t pid, const uint8_t *s, size_t len)
     else if (pid == kPidSdt && tableId == 0x4A)
         parseNitBat(s, len, true, version);
     else if (pid == kPidEit && tableId >= 0x4E && tableId <= 0x6F)
-        parseEit(s, len);
+        parseEit(s, len, version);
     else if (pid == kPidTdt && (tableId == 0x70 || tableId == 0x73))
         parseTime(s, len);
 }
@@ -535,7 +541,88 @@ void TsTableAnalyzer::parseSdt(const uint8_t *s, size_t len)
     }
 }
 
-void TsTableAnalyzer::parseEit(const uint8_t *s, size_t len)
+namespace {
+
+// Short, extended, content and parental rating descriptors of one event
+// Length of the character table selector at the start of a DVB string (EN 300 468 annex A)
+size_t selectorLength(const uint8_t *p, size_t len)
+{
+    if (len == 0 || p[0] >= 0x20)
+        return 0;
+    if (p[0] == 0x10)
+        return len >= 3 ? 3 : len;
+    if (p[0] == 0x1F)
+        return len >= 2 ? 2 : len;
+    return 1;
+}
+
+void parseEventDescriptors(EventInfo &ev, const uint8_t *p, size_t len)
+{
+    std::string rawExtended;
+    forEachDescriptor(p, len, [&](uint8_t tag, const uint8_t *d, size_t l) {
+        if (tag == 0x4D && l >= 5 && ev.name.empty()) { // short event
+            ev.language = lang(d);
+            const size_t nl = d[3];
+            if (4 + nl + 1 > l)
+                return;
+            ev.name = text(d + 4, nl);
+            const size_t tl = d[4 + nl];
+            if (5 + nl + tl <= l)
+                ev.text = text(d + 5 + nl, tl);
+        } else if (tag == 0x4E && l >= 6) { // extended event: items + text, split over several descriptors
+            if (ev.language.empty())
+                ev.language = lang(d + 1);
+            const size_t itemsLen = d[4];
+            if (5 + itemsLen + 1 > l)
+                return;
+            size_t i = 5;
+            while (i + 1 <= 5 + itemsLen) {
+                const size_t dl = d[i];
+                if (i + 1 + dl + 1 > 5 + itemsLen)
+                    break;
+                const size_t il = d[i + 1 + dl];
+                if (i + 2 + dl + il > 5 + itemsLen)
+                    break;
+                ev.items.emplace_back(text(d + i + 1, dl), text(d + i + 2 + dl, il));
+                i += 2 + dl + il;
+            }
+            const size_t tl = d[5 + itemsLen];
+            if (6 + itemsLen + tl <= l && tl > 0) {
+                const uint8_t *t = d + 6 + itemsLen;
+                size_t n = tl;
+                // Joined raw and decoded once: a continuation that repeats the first piece's
+                // character table selector drops it, one without inherits it
+                if (!rawExtended.empty()) {
+                    const size_t sel = selectorLength(reinterpret_cast<const uint8_t *>(rawExtended.data()),
+                                                      rawExtended.size());
+                    if (sel > 0 && n >= sel && std::equal(t, t + sel, rawExtended.begin(),
+                                                          [](uint8_t a, char b) { return a == static_cast<uint8_t>(b); })) {
+                        t += sel;
+                        n -= sel;
+                    }
+                }
+                rawExtended.append(reinterpret_cast<const char *>(t), n);
+            }
+        } else if (tag == 0x54) { // content
+            for (size_t i = 0; i + 2 <= l; i += 2)
+                ev.content.push_back(d[i]);
+            if (ev.genre.empty() && !ev.content.empty())
+                ev.genre = contentGenreName(ev.content.front());
+        } else if (tag == 0x55 && l >= 4 && ev.parentalAge == 0) { // parental rating
+            const uint8_t r = d[3];
+            if (r >= 0x01 && r <= 0x0F) {
+                ev.parentalAge = r + 3;
+                ev.ratingCountry = lang(d);
+            }
+        }
+    });
+    if (!rawExtended.empty())
+        ev.extendedText = text(reinterpret_cast<const uint8_t *>(rawExtended.data()), rawExtended.size());
+}
+
+} // namespace
+
+void TsTableAnalyzer::parseEit(const uint8_t *s, size_t len, int version)
 {
     const uint8_t tableId = s[0];
     if (len < 18)
@@ -546,6 +633,17 @@ void TsTableAnalyzer::parseEit(const uint8_t *s, size_t len)
     const uint8_t sectionNumber = s[6];
     const size_t end = len - 4;
     const bool pf = tableId == 0x4E || tableId == 0x4F;
+    const uint64_t serviceKey = (static_cast<uint64_t>(onid) << 32) | (static_cast<uint64_t>(tsid) << 16) | sid;
+
+    // Sections repeat continuously; decode each (table, service, section) once per version
+    if (!pf) {
+        const uint64_t secKey = (serviceKey << 16) | (static_cast<uint64_t>(tableId) << 8) | sectionNumber;
+        auto it = m_eitSectionVersions.find(secKey);
+        if (it != m_eitSectionVersions.end() && it->second == version)
+            return;
+        if (m_eitSectionVersions.size() < 2 * kMaxEpgEvents)
+            m_eitSectionVersions[secKey] = static_cast<uint8_t>(version);
+    }
 
     size_t i = 14;
     int index = 0;
@@ -556,24 +654,13 @@ void TsTableAnalyzer::parseEit(const uint8_t *s, size_t len)
         ev.startUtc = dvbTime(s + i + 2);
         ev.durationSec = bcdDuration(s + i + 7);
         ev.runningStatus = s[i + 10] >> 5;
+        ev.scrambled = (s[i + 10] & 0x10) != 0;
         const size_t dl = u16(s + i + 10) & 0x0FFF;
         if (i + 12 + dl > end)
             break;
+        parseEventDescriptors(ev, s + i + 12, dl);
         if (pf) {
-            forEachDescriptor(s + i + 12, dl, [&](uint8_t tag, const uint8_t *d, size_t l) {
-                if (tag != 0x4D || l < 5 || !ev.name.empty())
-                    return;
-                ev.language = lang(d);
-                const size_t nl = d[3];
-                if (4 + nl + 1 > l)
-                    return;
-                ev.name = text(d + 4, nl);
-                const size_t tl = d[4 + nl];
-                if (5 + nl + tl <= l)
-                    ev.text = text(d + 5 + nl, tl);
-            });
-            const uint64_t key = (static_cast<uint64_t>(onid) << 32) | (static_cast<uint64_t>(tsid) << 16) | sid;
-            ServiceInfo &svc = m_services[key];
+            ServiceInfo &svc = m_services[serviceKey];
             svc.serviceId = sid;
             svc.tsid = tsid;
             svc.onid = onid;
@@ -590,9 +677,89 @@ void TsTableAnalyzer::parseEit(const uint8_t *s, size_t len)
             if (m_scheduleSeen.size() < kMaxScheduleEvents && m_scheduleSeen.insert(key).second)
                 ++m_scheduleEvents;
         }
+        if (ev.startUtc > 0)
+            storeEvent(serviceKey, ev);
         ++index;
         i += 12 + dl;
     }
+}
+
+void TsTableAnalyzer::storeEvent(uint64_t serviceKey, const EventInfo &ev)
+{
+    auto &events = m_epg[serviceKey];
+    auto it = events.find(ev.eventId);
+    if (it != events.end()) {
+        EventInfo &old = it->second;
+        // p/f and schedule carry the same event; keep the richer description
+        EventInfo merged = ev;
+        if (merged.extendedText.empty())
+            merged.extendedText = old.extendedText;
+        if (merged.items.empty())
+            merged.items = old.items;
+        if (merged.content.empty()) {
+            merged.content = old.content;
+            merged.genre = old.genre;
+        }
+        if (merged.parentalAge == 0) {
+            merged.parentalAge = old.parentalAge;
+            merged.ratingCountry = old.ratingCountry;
+        }
+        if (merged.name.empty()) {
+            merged.name = old.name;
+            merged.text = old.text;
+            merged.language = old.language;
+        }
+        if (merged.startUtc == old.startUtc && merged.durationSec == old.durationSec && merged.name == old.name
+            && merged.text == old.text && merged.extendedText == old.extendedText && merged.genre == old.genre
+            && merged.parentalAge == old.parentalAge && merged.runningStatus == old.runningStatus)
+            return;
+        old = std::move(merged);
+        ++m_epgVersion;
+        return;
+    }
+    if (m_epgCount >= kMaxEpgEvents)
+        return;
+    // A different event at the same start time replaces the old one (rescheduling)
+    for (auto o = events.begin(); o != events.end();) {
+        if (o->second.startUtc == ev.startUtc) {
+            o = events.erase(o);
+            --m_epgCount;
+        } else {
+            ++o;
+        }
+    }
+    events.emplace(ev.eventId, ev);
+    ++m_epgCount;
+    ++m_epgVersion;
+}
+
+std::vector<ServiceSchedule> TsTableAnalyzer::epg() const
+{
+    std::vector<ServiceSchedule> out;
+    for (const auto &svc : m_epg) {
+        ServiceSchedule sch;
+        sch.onid = static_cast<uint16_t>(svc.first >> 32);
+        sch.tsid = static_cast<uint16_t>(svc.first >> 16);
+        sch.serviceId = static_cast<uint16_t>(svc.first);
+        auto si = m_services.find(svc.first);
+        if (si != m_services.end()) {
+            sch.serviceName = si->second.name;
+            sch.actual = si->second.actual;
+        } else {
+            sch.actual = sch.tsid == m_tsid;
+        }
+        for (const auto &e : svc.second)
+            sch.events.push_back(e.second);
+        std::sort(sch.events.begin(), sch.events.end(),
+                  [](const EventInfo &a, const EventInfo &b) { return a.startUtc < b.startUtc; });
+        out.push_back(std::move(sch));
+    }
+    std::stable_sort(out.begin(), out.end(), [](const ServiceSchedule &a, const ServiceSchedule &b) {
+        if (a.actual != b.actual)
+            return a.actual;
+        return std::tie(a.onid, a.tsid, a.serviceId) < std::tie(b.onid, b.tsid, b.serviceId);
+    });
+    return out;
 }
 
 void TsTableAnalyzer::parseTime(const uint8_t *s, size_t len)
@@ -678,6 +845,8 @@ TsReport TsTableAnalyzer::report() const
     r.sections = m_sections;
     r.crcErrors = m_crcErrors;
     r.scheduleEvents = m_scheduleEvents;
+    r.epgEvents = m_epgCount;
+    r.epgVersion = m_epgVersion;
     rebuildPidUsage(r);
     return r;
 }

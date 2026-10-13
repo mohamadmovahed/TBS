@@ -25,6 +25,10 @@ public:
     void updateSnapshot(const tbs::bb::ProcessorSnapshot &snap);
     void reset();
 
+signals:
+    // Double-click on a service (audioPid -1) or on one of its audio streams
+    void watchRequested(int isi, int programNumber, int audioPid);
+
 private:
     void rebuildTree(const tbs::bb::TsReport &r);
     void updateTables(const tbs::bb::TsReport &r);

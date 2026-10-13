@@ -17,6 +17,11 @@ void ReceiverController::setPreviewSink(std::function<void(const uint8_t *, size
     m_previewSink = std::move(sink);
 }
 
+void ReceiverController::setPreviewStream(int isi)
+{
+    m_rx.setPreviewStream(isi);
+}
+
 void ReceiverController::setPreviewEnabled(bool on)
 {
     m_rx.setPreviewEnabled(on);

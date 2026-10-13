@@ -15,7 +15,7 @@ namespace tbs {
 namespace bb {
 
 // Collects PSI/SI sections from a transport stream and decodes PAT, CAT,
-// PMT, NIT, SDT, BAT, EIT (present/following; schedule counted) and TDT/TOT.
+// PMT, NIT, SDT, BAT, EIT (present/following and schedule, kept as an EPG) and TDT/TOT.
 // Not thread safe: feed and query from one thread (Processor adds locking).
 class TBSBBPROC_API TsTableAnalyzer
 {
@@ -32,6 +32,9 @@ public:
     void reset();
 
     TsReport report() const;
+    // Full EPG (present/following and schedule events) of all services
+    std::vector<ServiceSchedule> epg() const;
+    uint64_t epgVersion() const { return m_epgVersion; }
     uint64_t packets() const { return m_packets; }
 
 private:
@@ -49,7 +52,8 @@ private:
     void parsePmt(uint16_t pid, const uint8_t *s, size_t len, int version);
     void parseNitBat(const uint8_t *s, size_t len, bool bat, int version);
     void parseSdt(const uint8_t *s, size_t len);
-    void parseEit(const uint8_t *s, size_t len);
+    void parseEit(const uint8_t *s, size_t len, int version);
+    void storeEvent(uint64_t serviceKey, const EventInfo &ev);
     void parseTime(const uint8_t *s, size_t len);
     void rebuildPidUsage(TsReport &r) const;
 
@@ -76,6 +80,11 @@ private:
     std::map<TableKey, TableStat> m_tableStats;
     std::map<TableKey, std::set<uint32_t>> m_tableInstances;
     std::set<uint64_t> m_scheduleSeen; // (service << 16 | event id) to count unique schedule events
+    // EPG: service key -> event id -> event; EIT section versions already decoded
+    std::map<uint64_t, std::map<uint16_t, EventInfo>> m_epg;
+    std::map<uint64_t, uint8_t> m_eitSectionVersions;
+    size_t m_epgCount = 0;
+    uint64_t m_epgVersion = 0;
 };
 
 } // namespace bb

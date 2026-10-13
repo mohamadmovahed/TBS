@@ -114,6 +114,110 @@ std::string tableName(uint8_t id)
     }
 }
 
+std::string contentGenreName(uint8_t n)
+{
+    switch (n) {
+    case 0x10: return "Movie / drama";
+    case 0x11: return "Detective / thriller";
+    case 0x12: return "Adventure / western / war";
+    case 0x13: return "Science fiction / fantasy / horror";
+    case 0x14: return "Comedy";
+    case 0x15: return "Soap / melodrama / folklore";
+    case 0x16: return "Romance";
+    case 0x17: return "Serious / classical / religious / historical drama";
+    case 0x18: return "Adult movie / drama";
+    case 0x20: return "News / current affairs";
+    case 0x21: return "News / weather report";
+    case 0x22: return "News magazine";
+    case 0x23: return "Documentary";
+    case 0x24: return "Discussion / interview / debate";
+    case 0x30: return "Show / game show";
+    case 0x31: return "Game show / quiz / contest";
+    case 0x32: return "Variety show";
+    case 0x33: return "Talk show";
+    case 0x40: return "Sports";
+    case 0x41: return "Special sports event";
+    case 0x42: return "Sports magazine";
+    case 0x43: return "Football / soccer";
+    case 0x44: return "Tennis / squash";
+    case 0x45: return "Team sports";
+    case 0x46: return "Athletics";
+    case 0x47: return "Motor sport";
+    case 0x48: return "Water sport";
+    case 0x49: return "Winter sports";
+    case 0x4A: return "Equestrian";
+    case 0x4B: return "Martial sports";
+    case 0x50: return "Children's / youth";
+    case 0x51: return "Pre-school children's";
+    case 0x52: return "Entertainment 6 to 14";
+    case 0x53: return "Entertainment 10 to 16";
+    case 0x54: return "Informational / educational / school";
+    case 0x55: return "Cartoons / puppets";
+    case 0x60: return "Music / ballet / dance";
+    case 0x61: return "Rock / pop";
+    case 0x62: return "Serious / classical music";
+    case 0x63: return "Folk / traditional music";
+    case 0x64: return "Jazz";
+    case 0x65: return "Musical / opera";
+    case 0x66: return "Ballet";
+    case 0x70: return "Arts / culture";
+    case 0x71: return "Performing arts";
+    case 0x72: return "Fine arts";
+    case 0x73: return "Religion";
+    case 0x74: return "Popular culture / traditional arts";
+    case 0x75: return "Literature";
+    case 0x76: return "Film / cinema";
+    case 0x77: return "Experimental film / video";
+    case 0x78: return "Broadcasting / press";
+    case 0x79: return "New media";
+    case 0x7A: return "Arts / culture magazine";
+    case 0x7B: return "Fashion";
+    case 0x80: return "Social / political / economics";
+    case 0x81: return "Magazine / report / documentary";
+    case 0x82: return "Economics / social advisory";
+    case 0x83: return "Remarkable people";
+    case 0x90: return "Education / science / factual";
+    case 0x91: return "Nature / animals / environment";
+    case 0x92: return "Technology / natural sciences";
+    case 0x93: return "Medicine / physiology / psychology";
+    case 0x94: return "Foreign countries / expeditions";
+    case 0x95: return "Social / spiritual sciences";
+    case 0x96: return "Further education";
+    case 0x97: return "Languages";
+    case 0xA0: return "Leisure / hobbies";
+    case 0xA1: return "Tourism / travel";
+    case 0xA2: return "Handicraft";
+    case 0xA3: return "Motoring";
+    case 0xA4: return "Fitness and health";
+    case 0xA5: return "Cooking";
+    case 0xA6: return "Advertisement / shopping";
+    case 0xA7: return "Gardening";
+    case 0xB0: return "Original language";
+    case 0xB1: return "Black and white";
+    case 0xB2: return "Unpublished";
+    case 0xB3: return "Live broadcast";
+    default: break;
+    }
+    // Unlisted level 2: fall back to the level 1 group
+    static const char *const level1[16] = {"",
+                                           "Movie / drama",
+                                           "News / current affairs",
+                                           "Show / game show",
+                                           "Sports",
+                                           "Children's / youth",
+                                           "Music / ballet / dance",
+                                           "Arts / culture",
+                                           "Social / political / economics",
+                                           "Education / science / factual",
+                                           "Leisure / hobbies",
+                                           "Special characteristics",
+                                           "",
+                                           "",
+                                           "",
+                                           "User defined"};
+    return level1[n >> 4];
+}
+
 std::string runningStatusName(uint8_t s)
 {
     static const char *const names[] = {"undefined", "not running", "starts soon", "pausing", "running", "off-air", "", ""};

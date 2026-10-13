@@ -34,7 +34,7 @@ CMake ≥ 3.16 and a C++17 compiler are required. Everything else is optional an
 | `TBS_BUILD_GUI` | ON | Qt GUI (skipped with a warning if Qt is missing) |
 | `TBS_BUILD_TOOLS` | ON | `tbs-cli`, `tbs-make-test-stream`, `tbs-c-example` |
 | `TBS_BUILD_TESTS` | ON | `ctest` unit and end-to-end tests |
-| `TBS_ENABLE_FFMPEG` | ON | Video preview in the GUI |
+| `TBS_ENABLE_FFMPEG` | ON | Video preview in the GUI; with Qt 6 Multimedia and libswresample also audio |
 | `TBSDVB_ENABLE_ZMQ` | ON | ZeroMQ sink in the library |
 | `TBSDVB_ENABLE_SRT` | ON | SRT network output (UDP and RTP need nothing extra) |
 | `TBSDVB_BUILD_SHARED` | OFF | Build `tbsdvb` as a shared library (DLL/.so) |
@@ -42,7 +42,8 @@ CMake ≥ 3.16 and a C++17 compiler are required. Everything else is optional an
 **Linux (Debian/Ubuntu)**
 ```sh
 sudo apt install build-essential cmake pkg-config qt6-base-dev libzmq3-dev \
-                 libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libsrt-gnutls-dev
+                 libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libswresample-dev \
+                 qt6-multimedia-dev libsrt-gnutls-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j && ctest --test-dir build
 ./build/app/tbs-receiver
@@ -171,11 +172,21 @@ DLL/.so for other languages.
   * **Stream TS to network**: any number of UDP, RTP or SRT outputs, each sending the whole TS, a PID list or
     one service picked from the live service list (see below). Each row shows its rate and state while running;
   * the video preview, which can be switched on or off while running.
+* **Preview**, above the video:
+  * **Service:** pick a service, or leave it on automatic (the first service with video). In BBFrame mode
+    this also selects the input stream (ISI) that is rebuilt. Double-clicking a service in the Services or
+    EPG tab selects it too, and double-clicking an audio stream in the Services tab selects that track.
+  * **Audio:** the default track, a track by language and codec, or off. Changing the track does not
+    interrupt the picture. Radio services (audio only) play too.
+  * **Volume and mute.** Audio needs Qt 6 Multimedia; video frames are timed against the audio clock for
+    lip sync.
 * **Status**:
   * header: lock pill;
   * acquisition chain: Signal → Carrier → FEC → Sync → Lock;
   * tiles with live sparklines (hover for values): signal level, C/N with a quality label, bitrate, and errors;
   * Overview: MODCOD, roll-off, stream ID, temperature, TS counters, decoded BBHeader, output status;
+  * EPG: services, their programmes by day with the running one highlighted, details (extended text,
+    genre, age rating), search, and **Export XMLTV…**;
   * PIDs: per-PID share bars;
   * Log.
 * Light/dark toggle in the header. **F5** starts and stops. `--autostart` starts at launch;
@@ -236,13 +247,16 @@ Each BBFrame is routed by its MATYPE to a pipeline for its input stream (ISI), s
 A plain TS capture (TS mode) goes through the same table analysis.
 
 **Transport streams:**
-- **Tables:** PAT, CAT, PMT, NIT actual/other, SDT actual/other, BAT, EIT present/following (schedule events are counted), and TDT/TOT. Every section is CRC-checked.
+- **Tables:** PAT, CAT, PMT, NIT actual/other, SDT actual/other, BAT, EIT present/following and schedule (actual and other), and TDT/TOT. Every section is CRC-checked.
 - **Results:**
   - services with provider, type, scrambling and now/next events;
   - components (video/audio/subtitles/teletext, codec, language);
   - ECM/EMM PIDs with the CA system;
   - networks with satellite delivery parameters, including S2X ISI/PLS;
   - bouquets, stream time, per-table versions and section/CRC counts;
+  - an **EPG** from the EIT: short and extended event text (joined over several descriptors), items,
+    genre (content descriptor), parental rating and running status. `Processor::epg(isi)` returns it, and
+    `formatXmltv()` turns it into an XMLTV document;
   - a description of what each PID carries.
 - **Text:** DVB text is converted to UTF-8 (ISO 8859-1/2/5/6/7/8/9/15, UTF-8, UCS-2; Persian/Arabic services use ISO 8859-6).
 
@@ -309,12 +323,14 @@ BBFrames:
 ```sh
 ./build/tbs-bbproc capture.ts --pcap ip.pcap      # report + pcap; --verbose lists all flows and tables
 ./build/tbs-bbproc capture.ts --pcap ip.pcapng --pcapng --tun tbs0   # pcapng per stream, replay into tbs0
+./build/tbs-bbproc capture.ts --xmltv epg.xml                         # EPG as XMLTV
 ./build/tbs-cli --device linux:0:0 --freq 10971 --sr 29700 --pol h --bbframe --pcap ip.pcap   # live
 ./build/tbs-cli --device linux:0:0 --freq 10971 --sr 29700 --pol h --tun tbs0      # live MPE (TS mode) into tbs0
 ```
 
 **In the GUI:**
 - the **Services** tab shows the TS content;
+- the **EPG** tab shows the programme guide;
 - the **IP / GSE** tab shows rates, protocols, labels, top flows, GSE and MPE health, and the pcap and TUN status;
 - the Overview shows the detected content per ISI;
 - in TS mode, the PID table describes each PID.
@@ -323,6 +339,7 @@ Turn on IP output under **Outputs → Write IP to pcap** and **Outputs → Send 
 
 ![Services tab](docs/screenshot-services.png)
 ![IP / GSE tab](docs/screenshot-ip-gse.png)
+![EPG tab and service/audio selection](docs/screenshot-epg.png)
 
 ## TS network output
 
@@ -385,7 +402,7 @@ Generators for the content processing:
 ```sh
 ./build/tbs-make-test-stream --gse --out gse.ts                 # GSE IP traffic (UDP multicast, TCP, IPv6, ARP)
 ./build/tbs-make-test-stream --gse --hem --dfl 3000 --out hem.ts
-./build/tbs-make-test-stream --add-si --in video.ts --out si.ts # adds NIT, EIT now/next, TDT, CAT, BAT
+./build/tbs-make-test-stream --add-si --in video.ts --out si.ts # adds NIT, EIT now/next + 2-day schedule, TDT, CAT, BAT
 ./build/tbs-make-test-stream --mis --in video.ts --out mis.ts   # TS on ISI 1 + GSE on ISI 2
 ./build/tbs-make-test-stream --mpe --add-si --out mpe.ts        # MPE IP traffic on PID 0x0500
 ```

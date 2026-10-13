@@ -217,6 +217,17 @@ void Processor::pushTs(const uint8_t *packets, size_t count)
     d->pushTsToMpe(s, packets, count);
 }
 
+std::vector<ServiceSchedule> Processor::epg(int isi)
+{
+    std::lock_guard<std::mutex> lock(d->mutex);
+    auto it = d->streams.find(isi);
+    if (it == d->streams.end() && isi < 0)
+        it = d->streams.find(kTsInputKey); // plain TS capture
+    if (it == d->streams.end())
+        return {};
+    return it->second->psi.epg();
+}
+
 ProcessorSnapshot Processor::snapshot()
 {
     std::lock_guard<std::mutex> lock(d->mutex);

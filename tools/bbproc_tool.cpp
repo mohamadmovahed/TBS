@@ -2,6 +2,7 @@
 //
 //   tbs-bbproc capture.bbf                    report stream content, tables, GSE/IP statistics
 //   tbs-bbproc capture.ts --pcap ip.pcap      also extract GSE IP packets to a pcap file
+//   tbs-bbproc capture.ts --xmltv epg.xml     also export the EPG
 //
 // Accepts plain TS, the card's pseudo-TS, raw BBFrames and 0xB8-prefixed BBFrames.
 
@@ -17,6 +18,7 @@ int main(int argc, char **argv)
     std::string input;
     tbs::bb::ProcessorConfig cfg;
     bool verbose = false;
+    std::string xmltv;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -31,6 +33,8 @@ int main(int argc, char **argv)
             cfg.tun.name = argv[++i];
         } else if (a == "--tap") {
             cfg.tun.tap = true;
+        } else if (a == "--xmltv" && i + 1 < argc) {
+            xmltv = argv[++i];
         } else if (a == "--raw-ip") {
             cfg.pcap.ethernetFraming = false;
         } else if (a == "--all-pdus") {
@@ -48,10 +52,11 @@ int main(int argc, char **argv)
         }
     }
     if (input.empty()) {
-        std::printf("Usage: %s CAPTURE [--pcap FILE] [--pcapng] [--raw-ip] [--all-pdus] [--tun NAME [--tap]] [--verbose]\n"
+        std::printf("Usage: %s CAPTURE [--pcap FILE] [--pcapng] [--raw-ip] [--all-pdus] [--tun NAME [--tap]] [--xmltv FILE] [--verbose]\n"
                     "  CAPTURE    TS, pseudo-TS, raw BBFrames or 0xB8 BBFrames\n"
                     "  --pcap     write IP packets carried in GSE or MPE to FILE (--pcapng: one interface per stream)\n"
                     "  --tun      replay the IP packets into a Linux TUN (or --tap) interface\n"
+                    "  --xmltv    write the EPG (EIT present/following and schedule) as XMLTV\n"
                     "  --raw-ip   pcap with raw IP packets instead of Ethernet framing\n"
                     "  --all-pdus include non-IP PDUs (Ethernet framing only)\n"
                     "  --verbose  all flows and the table list\n",
@@ -75,6 +80,27 @@ int main(int argc, char **argv)
     }
     proc.close();
     std::printf("Input: %s (%s)\n", input.c_str(), tbs::bb::captureFormatName(format));
-    std::printf("%s", tbs::bb::formatReport(proc.snapshot(), verbose).c_str());
+    const tbs::bb::ProcessorSnapshot snap = proc.snapshot();
+    std::printf("%s", tbs::bb::formatReport(snap, verbose).c_str());
+    if (!xmltv.empty()) {
+        std::vector<tbs::bb::ServiceSchedule> all;
+        for (const auto &st : snap.streams)
+            for (auto &s : proc.epg(st.isi))
+                all.push_back(std::move(s));
+        const std::string doc = tbs::bb::formatXmltv(all);
+        std::FILE *f = std::fopen(xmltv.c_str(), "wb");
+        if (!f || std::fwrite(doc.data(), 1, doc.size(), f) != doc.size()) {
+            std::fprintf(stderr, "error: cannot write %s\n", xmltv.c_str());
+            if (f)
+                std::fclose(f);
+            return 1;
+        }
+        std::fclose(f);
+        size_t events = 0;
+        for (const auto &s : all)
+            events += s.events.size();
+        std::printf("XMLTV: %s, %u channels, %u programmes\n", xmltv.c_str(), static_cast<unsigned>(all.size()),
+                    static_cast<unsigned>(events));
+    }
     return 0;
 }

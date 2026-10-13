@@ -49,7 +49,25 @@ struct TBSBBPROC_API EventInfo
     uint8_t runningStatus = 0;
     std::string language;
     std::string name;
-    std::string text;
+    std::string text;          // short event descriptor
+    std::string extendedText;  // extended event descriptors, joined
+    std::vector<std::pair<std::string, std::string>> items; // extended event items (description, value)
+    std::vector<uint8_t> content; // content descriptor: level 1 << 4 | level 2 nibbles
+    std::string genre;            // name of the first content nibble pair
+    int parentalAge = 0;          // minimum age from the parental rating descriptor (0 = none)
+    std::string ratingCountry;
+    bool scrambled = false;       // free_CA_mode
+};
+
+// EIT schedule (and present/following) events of one service, sorted by start time
+struct TBSBBPROC_API ServiceSchedule
+{
+    uint16_t onid = 0;
+    uint16_t tsid = 0;
+    uint16_t serviceId = 0;
+    std::string serviceName;   // from the SDT, if known
+    bool actual = true;        // service of this transport stream
+    std::vector<EventInfo> events;
 };
 
 struct TBSBBPROC_API ServiceInfo
@@ -124,7 +142,16 @@ struct TBSBBPROC_API TsReport
     uint64_t sections = 0;
     uint64_t crcErrors = 0;
     uint64_t scheduleEvents = 0;           // EIT schedule events seen
+    uint64_t epgEvents = 0;                // events kept for the EPG (all services)
+    uint64_t epgVersion = 0;               // changes whenever the EPG content changes
 };
+
+// Content descriptor genre (EN 300 468 table 29) for level 1 << 4 | level 2
+TBSBBPROC_API std::string contentGenreName(uint8_t nibbles);
+
+// XMLTV document (https://wiki.xmltv.org) of the given schedules. Channel ids are
+// "<service>.<tsid>.<onid>.dvb".
+TBSBBPROC_API std::string formatXmltv(const std::vector<ServiceSchedule> &schedules);
 
 // Name tables shared with the UI
 TBSBBPROC_API std::string streamTypeName(uint8_t streamType);

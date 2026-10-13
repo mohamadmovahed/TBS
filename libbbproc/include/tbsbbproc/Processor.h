@@ -96,6 +96,9 @@ public:
 
     // Rates are computed relative to the previous snapshot() call; also flushes the pcap file
     ProcessorSnapshot snapshot();
+    // EPG of the transport stream on this input stream (-1 = single stream / TS capture).
+    // Can be large: fetch it when StreamReport::ts.epgVersion changes.
+    std::vector<ServiceSchedule> epg(int isi);
     void reset();
 
 private:

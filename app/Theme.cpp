@@ -239,6 +239,26 @@ QIcon icon(const QString &name, const QColor &color, int size)
         path.lineTo(s * 0.15, s * 0.76);
         path.closeSubpath();
         p.drawPath(path);
+    } else if (name == QLatin1String("volume") || name == QLatin1String("mute")) {
+        // Speaker, with sound waves or a cross
+        QPainterPath spk;
+        spk.moveTo(s * 0.14, s * 0.40);
+        spk.lineTo(s * 0.28, s * 0.40);
+        spk.lineTo(s * 0.46, s * 0.24);
+        spk.lineTo(s * 0.46, s * 0.76);
+        spk.lineTo(s * 0.28, s * 0.60);
+        spk.lineTo(s * 0.14, s * 0.60);
+        spk.closeSubpath();
+        p.setBrush(color);
+        p.drawPath(spk);
+        p.setBrush(Qt::NoBrush);
+        if (name == QLatin1String("volume")) {
+            p.drawArc(QRectF(s * 0.40, s * 0.34, s * 0.24, s * 0.32), -50 * 16, 100 * 16);
+            p.drawArc(QRectF(s * 0.38, s * 0.22, s * 0.44, s * 0.56), -50 * 16, 100 * 16);
+        } else {
+            p.drawLine(QPointF(s * 0.60, s * 0.38), QPointF(s * 0.84, s * 0.62));
+            p.drawLine(QPointF(s * 0.84, s * 0.38), QPointF(s * 0.60, s * 0.62));
+        }
     } else if (name == QLatin1String("logo")) {
         // Satellite dish
         p.setPen(Qt::NoPen);

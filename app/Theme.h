@@ -35,7 +35,7 @@ void apply(QApplication &app, Mode mode);
 Mode mode();
 const Tokens &tokens();
 
-// Vector icons drawn in the given colour: play, stop, refresh, sun, moon, folder, sync, logo
+// Vector icons drawn in the given colour: play, stop, refresh, sun, moon, folder, sync, volume, mute, logo
 QIcon icon(const QString &name, const QColor &color, int size = 18);
 
 // Small upper-case section caption

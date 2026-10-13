@@ -17,6 +17,7 @@ add_executable(tbs-receiver
     panels/PidTable.cpp panels/PidTable.h
     panels/ServicesPanel.cpp panels/ServicesPanel.h
     panels/IpPanel.cpp panels/IpPanel.h
+    panels/EpgPanel.cpp panels/EpgPanel.h
     widgets/ShareBarDelegate.cpp widgets/ShareBarDelegate.h
     widgets/MetricTile.cpp widgets/MetricTile.h
     widgets/StatusPill.cpp widgets/StatusPill.h
@@ -32,10 +33,21 @@ target_compile_definitions(tbs-receiver PRIVATE TBS_APP_VERSION="${PROJECT_VERSI
 if(TBS_ENABLE_FFMPEG)
     include(FindFFmpegLibs)
     if(TARGET tbs::ffmpeg)
-        target_sources(tbs-receiver PRIVATE video/VideoDecoder.cpp video/VideoDecoder.h)
+        target_sources(tbs-receiver PRIVATE video/VideoDecoder.cpp video/VideoDecoder.h video/AvSync.cpp video/AvSync.h)
         target_link_libraries(tbs-receiver PRIVATE tbs::ffmpeg)
         target_compile_definitions(tbs-receiver PRIVATE TBS_HAVE_FFMPEG=1)
         message(STATUS "GUI video preview: ON")
+        # Audio: decoded with libswresample, played with Qt Multimedia (both optional)
+        include(FindSwrLib)
+        find_package(Qt${QT_VERSION_MAJOR} QUIET COMPONENTS Multimedia)
+        if(TARGET tbs::swresample AND TARGET Qt${QT_VERSION_MAJOR}::Multimedia AND QT_VERSION_MAJOR EQUAL 6)
+            target_sources(tbs-receiver PRIVATE video/AudioOutput.cpp video/AudioOutput.h)
+            target_link_libraries(tbs-receiver PRIVATE tbs::swresample Qt${QT_VERSION_MAJOR}::Multimedia)
+            target_compile_definitions(tbs-receiver PRIVATE TBS_HAVE_AUDIO=1)
+            message(STATUS "GUI audio preview: ON")
+        else()
+            message(STATUS "GUI audio preview: OFF (needs Qt 6 Multimedia and libswresample)")
+        endif()
     else()
         message(WARNING "FFmpeg not found - video preview disabled")
     endif()

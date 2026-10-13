@@ -35,3 +35,4 @@ if(TBS_FFMPEG_INCLUDE_DIR)
     target_link_libraries(tbs::ffmpeg INTERFACE ${_tbs_ff_libs})
     message(STATUS "Found FFmpeg: ${TBS_FFMPEG_INCLUDE_DIR}")
 endif()
+

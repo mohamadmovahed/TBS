@@ -2,6 +2,8 @@
 
 #include "SettingsStore.h"
 #include "Theme.h"
+#include "panels/EpgPanel.h"
+#include "panels/FormHelpers.h"
 #include "panels/IpPanel.h"
 #include "panels/OutputPanel.h"
 #include "panels/OverviewPanel.h"
@@ -13,11 +15,17 @@
 #include "widgets/MetricTile.h"
 #include "widgets/StatusPill.h"
 #ifdef TBS_HAVE_FFMPEG
+#include "video/AvSync.h"
 #include "video/VideoDecoder.h"
+#ifdef TBS_HAVE_AUDIO
+#include "video/AudioOutput.h"
+#endif
 #endif
 
 #include <QApplication>
 #include <QButtonGroup>
+#include <QComboBox>
+#include <QDateTime>
 #include <QCloseEvent>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -28,6 +36,8 @@
 #include <QScrollArea>
 #include <QSettings>
 #include <QShortcut>
+#include <QSignalBlocker>
+#include <QSlider>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -108,12 +118,40 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_controller, &ReceiverController::statusUpdated, this, &MainWindow::onStatus);
     connect(m_controller, &ReceiverController::statsUpdated, this, &MainWindow::onStats);
     connect(m_controller, &ReceiverController::logMessage, this, &MainWindow::appendLog);
+    connect(m_epg, &EpgPanel::watchRequested, this, [this](int isi, int program, int audio) {
+        selectPreview(isi, program, audio);
+    });
+    connect(m_services, &ServicesPanel::watchRequested, this, [this](int isi, int program, int audio) {
+        selectPreview(isi, program, audio);
+        if (!m_output->videoPreview())
+            appendLog(tr("Switch on the video preview under Outputs to watch the service"));
+    });
 #ifdef TBS_HAVE_FFMPEG
-    connect(m_decoder, &VideoDecoder::frameReady, m_video, &VideoWidget::setFrame, Qt::QueuedConnection);
+#ifdef TBS_HAVE_AUDIO
+    m_audio = new AudioOutput(this);
+    AudioOutput *audio = m_audio;
+    m_avsync = new AvSync(m_video, [audio](double *pts) { return audio->clock(pts); }, this);
+    connect(m_decoder, &VideoDecoder::audioReady, m_audio, &AudioOutput::push, Qt::QueuedConnection);
+#else
+    m_avsync = new AvSync(m_video, nullptr, this);
+#endif
+    connect(m_decoder, &VideoDecoder::frameReady, m_avsync, &AvSync::push, Qt::QueuedConnection);
+    connect(m_decoder, &VideoDecoder::sessionStarted, this, [this]() {
+        m_avsync->reset();
+#ifdef TBS_HAVE_AUDIO
+        m_audio->reset();
+#endif
+    }, Qt::QueuedConnection);
+#ifdef TBS_HAVE_AUDIO
+    connect(m_decoder, &VideoDecoder::audioRestarted, m_audio, &AudioOutput::reset, Qt::QueuedConnection);
+#endif
     connect(m_decoder, &VideoDecoder::streamInfo, this, [this](const QString &info) {
-        appendLog(tr("Video: %1").arg(info));
-        m_video->setInfo(info.section(QLatin1Char(','), 1, 1).trimmed().isEmpty() ? info
-                                                                                  : info.section(QLatin1String(" / "), 0, 0));
+        appendLog(tr("Preview: %1").arg(info));
+        // Chip: codec and size of each stream, without the PIDs
+        QStringList chip;
+        for (const QString &part : info.split(QStringLiteral(" · ")))
+            chip << part.section(QStringLiteral(", PID"), 0, 0).replace(QStringLiteral(", "), QStringLiteral(" "));
+        m_video->setInfo(chip.join(QStringLiteral(" · ")));
         m_video->setMessage(info);
     }, Qt::QueuedConnection);
 #endif
@@ -266,6 +304,60 @@ QWidget *MainWindow::buildMain()
     auto *tv = new QVBoxLayout(top);
     tv->setContentsMargins(0, 0, 0, 0);
     tv->setSpacing(12);
+    // Preview selection: service, audio track, volume
+    auto *pv = new QHBoxLayout;
+    pv->setSpacing(8);
+    m_previewService = new QComboBox;
+    m_previewService->setToolTip(tr("Service shown in the preview (double-click a service in the Services tab too)"));
+    m_previewAudio = new QComboBox;
+    m_previewAudio->setToolTip(tr("Audio track of the preview"));
+    for (QComboBox *c : {m_previewService, m_previewAudio}) {
+        c->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        c->setMinimumContentsLength(12);
+    }
+    m_muteButton = new QToolButton;
+    m_muteButton->setCheckable(true);
+    m_muteButton->setToolTip(tr("Mute"));
+    m_muteButton->setAutoRaise(true);
+    m_volume = new QSlider(Qt::Horizontal);
+    m_volume->setRange(0, 100);
+    m_volume->setFixedWidth(110);
+    m_volume->setToolTip(tr("Volume"));
+    pv->addWidget(keyLabel(tr("Service")));
+    pv->addWidget(m_previewService, 2);
+    pv->addWidget(keyLabel(tr("Audio")));
+    pv->addWidget(m_previewAudio, 1);
+    pv->addWidget(m_muteButton);
+    pv->addWidget(m_volume);
+    tv->addLayout(pv);
+    m_previewService->addItem(tr("Automatic (first service with video)"), QVariantList{-1, 0});
+    m_previewAudio->addItem(tr("Default track"), -1);
+    m_previewAudio->addItem(tr("Off"), 0);
+#ifndef TBS_HAVE_AUDIO
+    m_previewAudio->setEnabled(false);
+    m_previewAudio->setToolTip(tr("This build has no audio support (needs Qt Multimedia)"));
+    m_muteButton->setVisible(false);
+    m_volume->setVisible(false);
+#endif
+    connect(m_previewService, qOverload<int>(&QComboBox::activated), this, [this](int i) {
+        const QVariantList v = m_previewService->itemData(i).toList();
+        selectPreview(v.value(0).toInt(), v.value(1).toInt(), -1);
+    });
+    connect(m_previewAudio, qOverload<int>(&QComboBox::activated), this, [this](int i) {
+        selectPreview(m_previewIsi, m_previewProgram, m_previewAudio->itemData(i).toInt());
+    });
+#ifdef TBS_HAVE_AUDIO
+    connect(m_volume, &QSlider::valueChanged, this, [this](int v) {
+        if (m_audio)
+            m_audio->setVolume(v / 100.0);
+    });
+    connect(m_muteButton, &QToolButton::toggled, this, [this](bool m) {
+        if (m_audio)
+            m_audio->setMuted(m);
+        refreshIcons();
+    });
+#endif
+
     m_video = new VideoWidget;
     tv->addWidget(m_video, 1);
 
@@ -324,6 +416,8 @@ QWidget *MainWindow::buildMain()
     m_ip = new IpPanel;
     tabs->addTab(scrollWrap(m_overview), tr("Overview"));
     tabs->addTab(m_services, tr("Services"));
+    m_epg = new EpgPanel;
+    tabs->addTab(m_epg, tr("EPG"));
     tabs->addTab(scrollWrap(m_ip), tr("IP / GSE"));
     tabs->addTab(wrapCard(m_pids), tr("PIDs"));
     m_logTab = wrapCard(m_log);
@@ -354,6 +448,12 @@ void MainWindow::loadSettings()
     m_overview->setBbFrameMode(m_config.capture == tbs::CaptureMode::BBFrame);
     restoreGeometry(s.value(QStringLiteral("window/geometry")).toByteArray());
     m_tuningDirty = false;
+    m_previewIsi = s.value(QStringLiteral("preview/isi"), -1).toInt();
+    m_previewProgram = s.value(QStringLiteral("preview/program"), 0).toInt();
+    m_previewAudioPid = s.value(QStringLiteral("preview/audioPid"), -1).toInt();
+    m_volume->setValue(s.value(QStringLiteral("preview/volume"), 80).toInt());
+    m_muteButton->setChecked(s.value(QStringLiteral("preview/muted"), false).toBool());
+    applyPreviewSelection();
 }
 
 void MainWindow::saveSettings()
@@ -364,6 +464,11 @@ void MainWindow::saveSettings()
     s.setValue(QStringLiteral("ui/videoPreview"), m_output->videoPreview());
     s.setValue(QStringLiteral("ui/theme"), Theme::mode() == Theme::Mode::Light ? QStringLiteral("light") : QStringLiteral("dark"));
     s.setValue(QStringLiteral("window/geometry"), saveGeometry());
+    s.setValue(QStringLiteral("preview/isi"), m_previewIsi);
+    s.setValue(QStringLiteral("preview/program"), m_previewProgram);
+    s.setValue(QStringLiteral("preview/audioPid"), m_previewAudioPid);
+    s.setValue(QStringLiteral("preview/volume"), m_volume->value());
+    s.setValue(QStringLiteral("preview/muted"), m_muteButton->isChecked());
 }
 
 tbs::ReceiverConfig MainWindow::currentConfig() const
@@ -423,6 +528,8 @@ void MainWindow::startCapture()
     }
     m_controller->setProcessor(m_processor);
     m_services->reset();
+    m_epg->reset();
+    m_epgState.clear();
     m_ip->reset();
     m_procTimer->start();
 
@@ -435,6 +542,10 @@ void MainWindow::stopCapture()
     m_controller->stop();
 #ifdef TBS_HAVE_FFMPEG
     m_decoder->stop();
+#endif
+#ifdef TBS_HAVE_AUDIO
+    m_audio->stop();
+    m_audioStarted = false;
 #endif
 }
 
@@ -455,6 +566,23 @@ void MainWindow::applyTuning()
 void MainWindow::setPreview(bool on)
 {
 #ifdef TBS_HAVE_FFMPEG
+#ifdef TBS_HAVE_AUDIO
+    if (on && m_audio->available()) {
+        if (!m_audioStarted) {
+            m_audio->setVolume(m_volume->value() / 100.0);
+            m_audio->setMuted(m_muteButton->isChecked());
+            m_audio->start();
+            m_audioStarted = true;
+            appendLog(tr("Audio output: %1").arg(m_audio->deviceName()));
+        }
+    } else {
+        if (on && !m_audioStarted)
+            appendLog(tr("No audio output device: the preview has no sound"));
+        m_audio->stop();
+        m_audioStarted = false;
+    }
+    m_decoder->setAudioWanted(m_audio->available());
+#endif
     if (on && m_running) {
         m_decoder->start();
         m_video->setMessage(tr("Waiting for video…"));
@@ -541,6 +669,10 @@ void MainWindow::onStateChanged(int state, const QString &error)
         m_controller->setPreviewEnabled(false);
 #ifdef TBS_HAVE_FFMPEG
         m_decoder->stop();
+#endif
+#ifdef TBS_HAVE_AUDIO
+        m_audio->stop();
+        m_audioStarted = false;
 #endif
         setRunningUi(false);
     }
@@ -644,8 +776,8 @@ void MainWindow::showSidebar(const QString &name)
 
 void MainWindow::showTab(const QString &name)
 {
-    static const QStringList names = {QStringLiteral("overview"), QStringLiteral("services"), QStringLiteral("ip"),
-                                      QStringLiteral("pids"), QStringLiteral("log")};
+    static const QStringList names = {QStringLiteral("overview"), QStringLiteral("services"), QStringLiteral("epg"),
+                                      QStringLiteral("ip"), QStringLiteral("pids"), QStringLiteral("log")};
     const int i = names.indexOf(name.toLower());
     if (i >= 0)
         m_tabs->setCurrentIndex(i);
@@ -664,6 +796,23 @@ void MainWindow::refreshProcessing()
         if (st.content == tbs::bb::StreamContent::TsInput)
             m_pids->setPidUsage(st.ts.pidUsage);
 
+    // EPG: fetched when it changed (at most every 5 s unless the tab is open) and each
+    // half minute so the programme running now moves on
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const bool epgVisible = m_tabs->currentWidget() == m_epg;
+    for (const auto &st : snap.streams) {
+        if (st.ts.epgEvents == 0)
+            continue;
+        EpgState &e = m_epgState[st.isi];
+        const bool changed = st.ts.epgVersion != e.version;
+        const qint64 minGap = epgVisible ? 1000 : 5000;
+        if ((changed && nowMs - e.fetchedMs >= minGap) || nowMs - e.fetchedMs >= 30000) {
+            e.version = st.ts.epgVersion;
+            e.fetchedMs = nowMs;
+            m_epg->setSchedules(st.isi, m_processor->epg(st.isi), st.ts.hasTime ? st.ts.utcTime : 0);
+        }
+    }
+
     // Services offered for network outputs
     QVector<ServiceChoice> services;
     for (const auto &st : snap.streams) {
@@ -681,6 +830,112 @@ void MainWindow::refreshProcessing()
     }
     if (!services.isEmpty())
         m_output->setServices(services);
+    updatePreviewChoices(snap);
+}
+
+void MainWindow::selectPreview(int isi, int programNumber, int audioPid)
+{
+    m_previewIsi = isi;
+    m_previewProgram = programNumber;
+    m_previewAudioPid = audioPid;
+    applyPreviewSelection();
+    m_previewChoicesSig = 0; // rebuild the combos (audio tracks of the new service)
+    if (m_processor)
+        updatePreviewChoices(m_processor->snapshot());
+}
+
+void MainWindow::applyPreviewSelection()
+{
+    m_controller->setPreviewStream(m_previewIsi);
+#ifdef TBS_HAVE_FFMPEG
+    // The decoder signals sessionStarted / audioRestarted, which drop the queued media
+    m_decoder->setSelection(m_previewProgram, m_previewAudioPid);
+#endif
+}
+
+void MainWindow::updatePreviewChoices(const tbs::bb::ProcessorSnapshot &snap)
+{
+    struct Track
+    {
+        int pid;
+        QString label;
+    };
+    struct Svc
+    {
+        int isi;
+        int program;
+        QString label;
+        std::vector<Track> audio;
+    };
+    const bool bb = m_config.capture == tbs::CaptureMode::BBFrame;
+    std::vector<Svc> list;
+    for (const auto &st : snap.streams) {
+        for (const auto &p : st.ts.programs) {
+            if (p.programNumber == 0)
+                continue;
+            Svc sv{st.isi, p.programNumber, QString(), {}};
+            QString name;
+            for (const auto &x : st.ts.services)
+                if (x.actual && x.serviceId == p.programNumber)
+                    name = QString::fromStdString(x.name);
+            bool video = false;
+            for (const auto &es : p.streams) {
+                video = video || es.kind == "Video";
+                if (es.kind == "Audio")
+                    sv.audio.push_back({es.pid, QStringLiteral("%1 · %2 · 0x%3")
+                                                    .arg(es.language.empty() ? tr("und") : QString::fromStdString(es.language))
+                                                    .arg(QString::fromStdString(es.codec))
+                                                    .arg(es.pid, 4, 16, QLatin1Char('0'))});
+            }
+            sv.label = QStringLiteral("%1 · %2").arg(p.programNumber).arg(name.isEmpty() ? tr("Program %1").arg(p.programNumber) : name);
+            if (bb && st.isi >= 0)
+                sv.label += tr(" · ISI %1").arg(st.isi);
+            if (p.pmtSeen && !video && !sv.audio.empty())
+                sv.label += tr(" (radio)");
+            list.push_back(sv);
+        }
+    }
+    // Rebuild only when something changed
+    std::string sig = std::to_string(m_previewIsi) + '/' + std::to_string(m_previewProgram) + '/'
+                      + std::to_string(m_previewAudioPid);
+    for (const Svc &sv : list) {
+        sig += '|' + sv.label.toStdString();
+        for (const Track &t : sv.audio)
+            sig += ',' + t.label.toStdString();
+    }
+    const size_t h = std::hash<std::string>()(sig);
+    if (h == m_previewChoicesSig)
+        return;
+    m_previewChoicesSig = h;
+
+    QSignalBlocker b1(m_previewService);
+    QSignalBlocker b2(m_previewAudio);
+    m_previewService->clear();
+    m_previewService->addItem(tr("Automatic (first service with video)"), QVariantList{-1, 0});
+    const Svc *current = nullptr;
+    for (const Svc &sv : list) {
+        m_previewService->addItem(sv.label, QVariantList{sv.isi, sv.program});
+        if (sv.program == m_previewProgram && (m_previewIsi < 0 || sv.isi < 0 || sv.isi == m_previewIsi)) {
+            m_previewService->setCurrentIndex(m_previewService->count() - 1);
+            current = &sv;
+        }
+    }
+    if (m_previewProgram > 0 && !current) {
+        m_previewService->addItem(tr("%1 · not in this stream").arg(m_previewProgram), QVariantList{m_previewIsi, m_previewProgram});
+        m_previewService->setCurrentIndex(m_previewService->count() - 1);
+    }
+    m_previewAudio->clear();
+    m_previewAudio->addItem(tr("Default track"), -1);
+    if (current)
+        for (const Track &t : current->audio)
+            m_previewAudio->addItem(t.label, t.pid);
+    m_previewAudio->addItem(tr("Off"), 0);
+    int ai = m_previewAudio->findData(m_previewAudioPid);
+    if (ai < 0 && m_previewAudioPid > 0) {
+        m_previewAudio->addItem(tr("PID 0x%1").arg(m_previewAudioPid, 4, 16, QLatin1Char('0')), m_previewAudioPid);
+        ai = m_previewAudio->count() - 1;
+    }
+    m_previewAudio->setCurrentIndex(std::max(0, ai));
 }
 
 void MainWindow::runDiagnostics()
@@ -730,6 +985,7 @@ void MainWindow::refreshIcons()
 {
     const Theme::Tokens &t = Theme::tokens();
     m_logo->setPixmap(Theme::icon(QStringLiteral("logo"), t.accent, 34).pixmap(34, 34));
+    m_muteButton->setIcon(Theme::icon(m_muteButton->isChecked() ? QStringLiteral("mute") : QStringLiteral("volume"), t.ink2));
     m_themeButton->setIcon(Theme::icon(Theme::mode() == Theme::Mode::Dark ? QStringLiteral("sun") : QStringLiteral("moon"), t.ink2));
     m_startButton->setIcon(Theme::icon(m_running ? QStringLiteral("stop") : QStringLiteral("play"), QColor(Qt::white), 14));
     m_applyButton->setIcon(Theme::icon(QStringLiteral("sync"), t.ink2, 16));

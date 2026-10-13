@@ -689,6 +689,99 @@ static void testPcapNg()
     CHECK_EQ(perIface[1], datagrams);
 }
 
+static void testEpg()
+{
+    using builders::EitEventSpec;
+    using builders::dvbString;
+    TsTableAnalyzer a;
+    const int64_t t0 = 1790000000; // 2026-09-21
+    auto ev = [&](uint16_t id, int64_t start, const char *name) {
+        EitEventSpec e;
+        e.id = id;
+        e.start = start;
+        e.duration = 3600;
+        e.name = dvbString(name);
+        e.text = dvbString("short");
+        return e;
+    };
+    // Schedule section 0: two events, one with extended text over two descriptors, items, genre, rating
+    EitEventSpec film = ev(10, t0 + 3600, "Film");
+    film.extended = {dvbString("Part one, "), dvbString("part two.")};
+    film.items = {{"Director", "X"}};
+    film.content = {0x14};
+    film.rating = 0x09;
+    const Bytes s0 = builders::makeEitSection(0x50, 101, 1, 2, 0, 0, 1,
+                                              {builders::eitEvent(ev(9, t0, "News")), builders::eitEvent(film)});
+    // Section 1 (other language selector in each piece: ISO 8859-6)
+    EitEventSpec ar = ev(11, t0 + 7200, "x");
+    ar.name = {0x02, 0xC7, 0xCE};
+    ar.extended = {{0x02, 0xC7, 0x20}, {0x02, 0xCE}};
+    const Bytes s1 = builders::makeEitSection(0x50, 101, 1, 2, 0, 1, 1, {builders::eitEvent(ar)});
+    a.pushSection(0x12, s0.data(), s0.size());
+    a.pushSection(0x12, s1.data(), s1.size());
+    const uint64_t v1 = a.epgVersion();
+    CHECK(v1 > 0);
+    // Repeats of the same section version change nothing
+    a.pushSection(0x12, s0.data(), s0.size());
+    CHECK_EQ(a.epgVersion(), v1);
+
+    auto epg = a.epg();
+    CHECK_EQ(epg.size(), 1u);
+    if (epg.size() == 1) {
+        const ServiceSchedule &sch = epg[0];
+        CHECK_EQ(sch.serviceId, 101);
+        CHECK_EQ(sch.tsid, 1);
+        CHECK_EQ(sch.onid, 2);
+        CHECK_EQ(sch.events.size(), 3u);
+        if (sch.events.size() == 3) {
+            CHECK_STR(sch.events[0].name, "News");
+            const EventInfo &f = sch.events[1];
+            CHECK_STR(f.name, "Film");
+            CHECK_STR(f.extendedText, "Part one, part two.");
+            CHECK_EQ(f.items.size(), 1u);
+            CHECK_STR(f.genre, "Comedy");
+            CHECK_EQ(f.parentalAge, 12);
+            CHECK_STR(f.ratingCountry, "FRA");
+            CHECK_EQ(f.startUtc, t0 + 3600);
+            CHECK_EQ(f.durationSec, 3600u);
+            CHECK_STR(sch.events[2].name, "اخ");
+            CHECK_STR(sch.events[2].extendedText, "ا خ"); // joined, decoded as ISO 8859-6
+        }
+    }
+
+    // New version: event 9 is replaced by event 12 at the same start time
+    const Bytes s0b = builders::makeEitSection(0x50, 101, 1, 2, 1, 0, 1,
+                                               {builders::eitEvent(ev(12, t0, "Breaking")), builders::eitEvent(film)});
+    a.pushSection(0x12, s0b.data(), s0b.size());
+    CHECK(a.epgVersion() > v1);
+    epg = a.epg();
+    CHECK(epg.size() == 1 && epg[0].events.size() == 3 && epg[0].events[0].name == "Breaking");
+
+    // p/f carries the same event id: the schedule's extended text is kept
+    EitEventSpec pf = ev(10, t0 + 3600, "Film");
+    pf.running = 4;
+    const Bytes p0 = builders::makeEitSection(0x4E, 101, 1, 2, 3, 0, 1, {builders::eitEvent(pf)});
+    a.pushSection(0x12, p0.data(), p0.size());
+    epg = a.epg();
+    CHECK(epg.size() == 1 && epg[0].events.size() == 3 && epg[0].events[1].runningStatus == 4
+          && epg[0].events[1].extendedText == "Part one, part two.");
+    const TsReport r = a.report();
+    CHECK_EQ(r.epgEvents, 3u);
+
+    // XMLTV
+    const std::string x = formatXmltv(epg);
+    CHECK(x.find("<channel id=\"101.1.2.dvb\">") != std::string::npos);
+    CHECK(x.find("start=\"20260921151320 +0000\" stop=\"20260921161320 +0000\"") != std::string::npos);
+    CHECK(x.find("<title lang=\"eng\">Film</title>") != std::string::npos);
+    CHECK(x.find("<category lang=\"en\">Comedy</category>") != std::string::npos);
+    CHECK(x.find("<value>12</value>") != std::string::npos);
+    CHECK(x.find("Director: X") != std::string::npos);
+    std::vector<ServiceSchedule> special(1);
+    special[0].serviceName = "A & B <C>";
+    CHECK(formatXmltv(special).find("A &amp; B &lt;C&gt;") != std::string::npos);
+    CHECK_STR(contentGenreName(0x4F), "Sports");
+}
+
 int main()
 {
     testDvbText();
@@ -700,6 +793,7 @@ int main()
     testMultistreamAndFiles();
     testMpe();
     testPcapNg();
+    testEpg();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

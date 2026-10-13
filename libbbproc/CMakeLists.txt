@@ -31,6 +31,7 @@ set(TBSBBPROC_SOURCES
     src/CaptureFile.cpp
     src/Report.cpp
     src/Mpe.cpp
+    src/Xmltv.cpp
     src/TunWriter.cpp
 )
 

@@ -774,6 +774,60 @@ static void testReceiverNetworkOutput()
     CHECK(logged);
 }
 
+// BBFrame mode with two TS input streams: the preview carries only the selected one
+static void testPreviewStream()
+{
+    const auto tsA = makeProgramPackets(900);
+    const auto tsB = makeMpts(20);
+    const auto fa = builders::tsToBbFrames(tsA, 2000);
+    const auto fb = builders::tsToBbFrames(tsB, 2000);
+    const std::string in = "tbs_test_preview.ts";
+    {
+        std::FILE *f = std::fopen(in.c_str(), "wb");
+        uint8_t cc = 0;
+        auto put = [&](Bytes fr, uint8_t isi) {
+            fr[0] = static_cast<uint8_t>(fr[0] & ~0x20);
+            fr[1] = isi;
+            fr[9] = BbHeader::crc8(fr.data(), 9);
+            for (const Bytes &p : builders::bbFrameToPseudoTs(fr, cc))
+                std::fwrite(p.data(), 1, 188, f);
+        };
+        for (size_t i = 0; i < std::max(fa.size(), fb.size()); ++i) {
+            if (i < fa.size())
+                put(fa[i], 1);
+            if (i < fb.size())
+                put(fb[i], 2);
+        }
+        std::fclose(f);
+    }
+    for (int want : {2, 1, -1}) {
+        ReceiverConfig cfg;
+        cfg.device.kind = DeviceKind::FileReplay;
+        cfg.device.replayFile = in;
+        cfg.device.replayLoop = false;
+        cfg.capture = CaptureMode::BBFrame;
+        Receiver rx;
+        Bytes preview;
+        Receiver::Callbacks cb;
+        cb.onPreviewTs = [&](const uint8_t *p, size_t n) { preview.insert(preview.end(), p, p + n); };
+        rx.setCallbacks(cb);
+        rx.setPreviewEnabled(true);
+        rx.setPreviewStream(want);
+        CHECK(rx.start(cfg));
+        for (int i = 0; i < 200 && rx.isRunning(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        rx.stop();
+        // -1 locks onto the first TS stream seen, ISI 1 here
+        const auto &expect = want == 2 ? tsB : tsA;
+        Bytes all;
+        for (const Bytes &p : expect)
+            all.insert(all.end(), p.begin(), p.end());
+        CHECK_EQ(preview.size(), all.size());
+        CHECK(preview == all);
+    }
+    std::remove(in.c_str());
+}
+
 #if defined(TBS_TEST_LINUX_INTERNALS)
 #include "platform/LinuxDvbDevice.h"
 
@@ -950,6 +1004,7 @@ int main()
     testTsFilter();
     testUdpRtpOutput();
     testReceiverNetworkOutput();
+    testPreviewStream();
 #if defined(TBS_TEST_LINUX_INTERNALS)
     testLinuxDiagnostics();
 #endif

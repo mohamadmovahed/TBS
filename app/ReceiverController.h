@@ -23,6 +23,7 @@ public:
     // Called on the receiver thread with decodable TS while preview is enabled
     void setPreviewSink(std::function<void(const uint8_t *, size_t)> sink);
     void setPreviewEnabled(bool on);
+    void setPreviewStream(int isi);
     // Content processing (tables, GSE, pcap) for the next start(); nullptr disables it
     void setProcessor(std::shared_ptr<tbs::bb::Processor> processor) { m_processor = std::move(processor); }
 

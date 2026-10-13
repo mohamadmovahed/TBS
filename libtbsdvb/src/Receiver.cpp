@@ -26,6 +26,7 @@ struct Receiver::Impl
     std::thread thread;
     std::atomic<bool> stopRequested{false};
     std::atomic<bool> preview{false};
+    std::atomic<int> previewIsi{-1};
     std::atomic<ReceiverState> state{ReceiverState::Stopped};
 
     mutable std::mutex mutex; // guards the members below
@@ -136,6 +137,11 @@ void Receiver::retune(const TuningParams &tuning)
 {
     std::lock_guard<std::mutex> lock(d->mutex);
     d->pendingTune = tuning;
+}
+
+void Receiver::setPreviewStream(int isi)
+{
+    d->previewIsi = isi;
 }
 
 void Receiver::setPreviewEnabled(bool on)
@@ -272,6 +278,8 @@ void Receiver::Impl::run(ReceiverConfig cfg)
         BbHeader lastHeader;
         bool haveHeader = false;
         bool previewOn = false;
+        int previewWant = -1;   // requested ISI
+        int previewLocked = -2; // ISI in use (-2: none yet)
         std::vector<uint8_t> previewBuf;
         previewBuf.reserve(188 * 512);
 
@@ -283,8 +291,25 @@ void Receiver::Impl::run(ReceiverConfig cfg)
                 s->writeBbFrame(frame, len, hdr);
             if (cb.onBbFrame)
                 cb.onBbFrame(frame, len, hdr);
-            if (previewOn)
+            if (previewOn && hdr.streamType() == BbHeader::StreamType::Transport) {
+                // One input stream only: TS of several ISIs must not be mixed
+                const int want = previewIsi.load();
+                if (want != previewWant) {
+                    previewWant = want;
+                    previewLocked = -2;
+                    bb2ts.reset();
+                }
+                const int isi = hdr.isi();
+                if (isi >= 0) {
+                    if (want >= 0 && isi != want)
+                        return;
+                    if (previewLocked == -2)
+                        previewLocked = isi;
+                    else if (isi != previewLocked)
+                        return;
+                }
                 bb2ts.pushFrame(frame, len, hdr, previewPacket);
+            }
         };
         auto onPackets = [&](const uint8_t *pk, size_t count) {
             for (IOutputSink *s : tsSinks)

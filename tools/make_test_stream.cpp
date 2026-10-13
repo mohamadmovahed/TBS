@@ -2,7 +2,7 @@
 //
 //   tbs-make-test-stream --out FILE [--in input.ts] [--add-si] [--dfl BYTES] [--hem] [--packets N]
 //       Wraps a transport stream (input file, or a synthetic one) into DVB-S2 BBFrames.
-//       --add-si inserts NIT, EIT present/following, TDT, CAT and BAT tables.
+//       --add-si inserts NIT, EIT present/following and a two-day schedule, TDT, CAT and BAT tables.
 //   tbs-make-test-stream --out FILE --gse [--hem] [--pdus N]
 //       Generic stream with GSE-encapsulated IP traffic (UDP multicast, TCP, IPv6, ARP).
 //   tbs-make-test-stream --out FILE --mpe [--in input.ts] [--pdus N]
@@ -72,31 +72,81 @@ std::vector<Bytes> siPackets(uint16_t tsid, uint16_t onid, uint16_t program, std
     put16(bat, 0xF000);
     add(makeSection(0x4A, 0x0042, 1, bat), 0x0011, 1);
 
-    // EIT p/f actual: the present and the following programme
-    auto eit = [&](uint8_t section, uint16_t eventId, std::time_t start, const std::string &name, const std::string &text) {
-        Bytes e;
-        put16(e, tsid);
-        put16(e, onid);
-        e.push_back(1);
-        e.push_back(0x4E);
-        put16(e, eventId);
-        mjdTime(start, e);
-        e.push_back(0x00);
-        e.push_back(0x30);
-        e.push_back(0x00);
-        Bytes d;
-        Bytes se = {'e', 'n', 'g', static_cast<uint8_t>(name.size())};
-        se.insert(se.end(), name.begin(), name.end());
-        se.push_back(static_cast<uint8_t>(text.size()));
-        se.insert(se.end(), text.begin(), text.end());
-        addDescriptor(d, 0x4D, se);
-        put16(e, static_cast<uint16_t>(((section == 0 ? 4 : 1) << 13) | d.size()));
-        e.insert(e.end(), d.begin(), d.end());
-        add(makeSection(0x4E, program, 1, e, section, 1), 0x0012, 2);
-    };
     const std::time_t slot = now - now % 1800;
-    eit(0, 1000, slot, "Test Pattern", "Colour bars and a 1 kHz tone");
-    eit(1, 1001, slot + 1800, "Late News", "Headlines from around the world");
+
+    // EIT schedule actual: two days of programmes with extended text, genre and rating
+    {
+        struct Show
+        {
+            const char *name;
+            const char *text;
+            uint8_t genre;
+            uint32_t duration;
+            uint8_t rating;
+        };
+        static const Show shows[] = {
+            {"Morning Briefing", "News, weather and traffic", 0x21, 3600, 0},
+            {"Wild Coasts", "Seabirds of the northern cliffs", 0x91, 2700, 0},
+            {"Final Whistle", "Football highlights and analysis", 0x43, 5400, 0},
+            {"The Last Signal", "A radio engineer uncovers a conspiracy", 0x11, 6300, 9},
+            {"Kitchen Lab", "Bread from four ingredients", 0xA5, 1800, 0},
+            {"Late Jazz", "Live from the club", 0x64, 3600, 0},
+        };
+        std::vector<Bytes> events;
+        std::vector<builders::EitEventSpec> specs;
+        std::time_t t = slot - 2 * 3600;
+        uint16_t id = 2000;
+        size_t k = 0;
+        while (t < slot + 2 * 86400) {
+            builders::EitEventSpec e;
+            e.id = id++;
+            e.start = t;
+            if (k % 7 == 6) {
+                // Arabic script (ISO 8859-6, selector 0x02), extended text split over two descriptors
+                e.lang = "per";
+                e.name = {0x02, 0xC7, 0xCE, 0xC8, 0xC7, 0xD1};                  // news
+                e.text = {0x02, 0xC7, 0xCE, 0xC8, 0xC7, 0xD1, 0x20, 0xE4, 0xCA}; // short text
+                e.extended = {{0x02, 0xC7, 0xCE, 0xC8, 0xC7, 0xD1, 0x20}, {0x02, 0xE4, 0xCA, 0xC7}};
+                e.content = {0x20};
+                e.duration = 1800;
+            } else {
+                const Show &sh = shows[k % 6];
+                e.name = dvbString(sh.name);
+                e.text = dvbString(sh.text);
+                e.duration = sh.duration;
+                e.content = {sh.genre};
+                e.rating = sh.rating;
+                if (sh.genre == 0x11) {
+                    e.extended = {dvbString("When a numbers station goes silent, Mara follows the last "),
+                                  dvbString("transmission across three countries.")};
+                    e.items = {{"Director", "A. Rahimi"}, {"Year", "2024"}};
+                }
+            }
+            events.push_back(builders::eitEvent(e));
+            specs.push_back(e);
+            t += e.duration;
+            ++k;
+        }
+        const size_t perSection = 4;
+        const size_t sections = (events.size() + perSection - 1) / perSection;
+        for (size_t sn = 0; sn < sections; ++sn) {
+            std::vector<Bytes> part(events.begin() + static_cast<std::ptrdiff_t>(sn * perSection),
+                                    events.begin() + static_cast<std::ptrdiff_t>(std::min(events.size(), (sn + 1) * perSection)));
+            add(builders::makeEitSection(0x50, program, tsid, onid, 1, static_cast<uint8_t>(sn),
+                                         static_cast<uint8_t>(sections - 1), part),
+                0x0012, 2);
+        }
+        // EIT p/f actual: the programme running now and the next one, from the same schedule
+        for (size_t i = 0; i + 1 < specs.size(); ++i) {
+            if (specs[i].start <= now && now < specs[i].start + specs[i].duration) {
+                builders::EitEventSpec present = specs[i], following = specs[i + 1];
+                present.running = 4;
+                add(builders::makeEitSection(0x4E, program, tsid, onid, 1, 0, 1, {builders::eitEvent(present)}), 0x0012, 2);
+                add(builders::makeEitSection(0x4E, program, tsid, onid, 1, 1, 1, {builders::eitEvent(following)}), 0x0012, 2);
+                break;
+            }
+        }
+    }
 
     // CAT: an EMM PID
     Bytes cat;
