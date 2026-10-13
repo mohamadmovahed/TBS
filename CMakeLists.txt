@@ -49,6 +49,11 @@ if(TBS_SANITIZE OR (TBS_BUILD_FUZZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 # ---- The library (no Qt) ----
+# windows.h defines min/max macros that break std::min/std::max
+if(WIN32)
+    add_compile_definitions(NOMINMAX)
+endif()
+
 add_subdirectory(libtbsdvb)
 # ---- BBFrame / TS content processing (no Qt, no hardware) ----
 add_subdirectory(libbbproc)

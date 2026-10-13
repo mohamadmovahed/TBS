@@ -198,7 +198,7 @@ void PcapWriter::writeRecord(const uint8_t *a, size_t alen, const uint8_t *b, si
 {
     const size_t total = alen + blen;
     const size_t incl = std::min<size_t>(total, kSnapLen);
-    const size_t aw = std::min(alen, incl);
+    const size_t aw = (std::min)(alen, incl);
     const size_t bw = incl - aw;
     bool ok;
     if (m_opt.format == PcapFormat::PcapNg) {
