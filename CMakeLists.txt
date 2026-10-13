@@ -53,6 +53,10 @@ endif()
 if(WIN32)
     add_compile_definitions(NOMINMAX)
 endif()
+# Sources are UTF-8 (string literals with non-ASCII text)
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
 
 add_subdirectory(libtbsdvb)
 # ---- BBFrame / TS content processing (no Qt, no hardware) ----

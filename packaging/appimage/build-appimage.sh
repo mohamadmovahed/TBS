@@ -10,7 +10,11 @@ set -euo pipefail
 
 SRC=$(cd "$(dirname "$0")/../.." && pwd)
 BUILD=${1:-$SRC/build-appimage}
+mkdir -p "$BUILD"
+BUILD=$(cd "$BUILD" && pwd) # absolute: the script changes directory below
 TOOLS=${TOOLS_DIR:-$BUILD/tools}
+mkdir -p "$TOOLS"
+TOOLS=$(cd "$TOOLS" && pwd)
 APPDIR=$BUILD/AppDir
 
 cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
