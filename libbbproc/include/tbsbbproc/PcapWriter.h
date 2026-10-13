@@ -5,14 +5,21 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 
 namespace tbs {
 namespace bb {
 
+enum class PcapFormat {
+    Pcap = 0,   // classic libpcap (all streams in one capture)
+    PcapNg = 1, // pcapng with one named interface per stream (ISI, MPE)
+};
+
 struct TBSBBPROC_API PcapOptions
 {
+    PcapFormat format = PcapFormat::Pcap;
     bool enabled = false;
     std::string path;            // empty = <home>/gse.pcap
     bool timestampSuffix = true;
@@ -38,8 +45,9 @@ public:
     void flush();
     bool isOpen() const { return m_file != nullptr; }
 
-    // Returns true if the PDU was written
-    bool write(const GsePdu &pdu, int64_t unixMicros);
+    // Returns true if the PDU was written. interfaceKey/interfaceName select the
+    // pcapng interface (created on first use); ignored for classic pcap.
+    bool write(const GsePdu &pdu, int64_t unixMicros, int interfaceKey = 0, const std::string &interfaceName = std::string());
 
     const std::string &fileName() const { return m_path; }
     uint64_t packets() const { return m_packets; }
@@ -49,7 +57,9 @@ public:
     static std::string resolvePath(const PcapOptions &opt);
 
 private:
-    void writeRecord(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen, int64_t unixMicros);
+    void writeRecord(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen, int64_t unixMicros, uint32_t iface);
+    uint32_t interfaceId(int key, const std::string &name);
+    bool put(const void *p, size_t n);
 
     PcapOptions m_opt;
     std::FILE *m_file = nullptr;
@@ -58,6 +68,7 @@ private:
     std::string m_error;
     uint64_t m_packets = 0;
     uint64_t m_bytes = 0;
+    std::map<int, uint32_t> m_interfaces; // pcapng: stream key -> interface id
 };
 
 } // namespace bb

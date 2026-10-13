@@ -50,7 +50,9 @@ void usage(const char *argv0)
         "  --buffer MIB                capture -> processing buffer (default 128)\n"
         "  --zmq ENDPOINT [--push] [--connect] [--topic T] [--header] [--packets N]\n"
         "  --analyze                   analyse the content (TS tables, GSE/IP) and print a report at the end\n"
-        "  --pcap FILE [--pcap-raw]    extract IP packets carried in GSE to a pcap file (BBFrame mode)\n"
+        "  --pcap FILE [--pcap-raw] [--pcapng]\n"
+        "                              write IP packets from GSE (BBFrame mode) or MPE (TS) to a pcap file\n"
+        "  --tun NAME [--tap]          send those packets to a Linux TUN (IP) or TAP (Ethernet) interface\n"
         "  --duration SEC              stop after SEC seconds (default: until Ctrl+C)\n"
         "  --quiet                     no periodic status line\n",
         argv0);
@@ -217,6 +219,14 @@ int main(int argc, char **argv)
             procCfg.pcap.timestampSuffix = false;
         } else if (a == "--pcap-raw") {
             procCfg.pcap.ethernetFraming = false;
+        } else if (a == "--pcapng") {
+            procCfg.pcap.format = tbs::bb::PcapFormat::PcapNg;
+        } else if (a == "--tun") {
+            analyze = true;
+            procCfg.tun.enabled = true;
+            procCfg.tun.name = next();
+        } else if (a == "--tap") {
+            procCfg.tun.tap = true;
         } else if (a == "--duration") {
             duration = std::stod(next());
         } else if (a == "--quiet") {
@@ -271,6 +281,9 @@ int main(int argc, char **argv)
             std::fprintf(stderr, "error: %s\n", perr.c_str());
             return 1;
         }
+        const auto first = proc->snapshot();
+        if (!first.tunWarning.empty())
+            std::fprintf(stderr, "warning: %s\n", first.tunWarning.c_str());
         if (cfg.capture == tbs::CaptureMode::BBFrame)
             cb.onBbFrame = [proc](const uint8_t *f, size_t n, const tbs::BbHeader &h) { proc->pushBbFrame(f, n, h); };
         else

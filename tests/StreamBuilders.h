@@ -339,6 +339,37 @@ inline std::vector<Bytes> sectionToTs(const Bytes &section, uint16_t pid, uint8_
     return out;
 }
 
+// MPE datagram section (EN 301 192), table 0x3E, with CRC-32
+inline Bytes makeMpeSection(const uint8_t mac[6], const Bytes &datagram, bool llcSnap, uint16_t etherType = 0x0800,
+                            bool scrambled = false)
+{
+    Bytes body;
+    if (llcSnap) {
+        body = {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00};
+        put16(body, etherType);
+    }
+    body.insert(body.end(), datagram.begin(), datagram.end());
+    Bytes s;
+    s.push_back(0x3E);
+    const size_t len = 9 + body.size() + 4;
+    s.push_back(static_cast<uint8_t>(0xB0 | ((len >> 8) & 0x0F)));
+    s.push_back(static_cast<uint8_t>(len));
+    s.push_back(mac[5]); // MAC_address_6
+    s.push_back(mac[4]); // MAC_address_5
+    s.push_back(static_cast<uint8_t>(0xC1 | (scrambled ? 0x10 : 0) | (llcSnap ? 0x02 : 0)));
+    s.push_back(0); // section_number
+    s.push_back(0); // last_section_number
+    s.push_back(mac[3]);
+    s.push_back(mac[2]);
+    s.push_back(mac[1]);
+    s.push_back(mac[0]);
+    s.insert(s.end(), body.begin(), body.end());
+    const uint32_t crc = crc32Mpeg(s.data(), s.size());
+    for (int i = 3; i >= 0; --i)
+        s.push_back(static_cast<uint8_t>(crc >> (8 * i)));
+    return s;
+}
+
 inline Bytes dvbString(const std::string &s)
 {
     return Bytes(s.begin(), s.end());

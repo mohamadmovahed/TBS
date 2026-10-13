@@ -553,6 +553,142 @@ static void testMultistreamAndFiles()
     }
 }
 
+// ---------------------------------------------------------------------------
+// MPE (IP in a transport stream)
+
+static std::vector<Bytes> buildMpeTs(size_t &datagrams, size_t &bytes)
+{
+    using namespace builders;
+    std::vector<Bytes> pk = buildSiPackets(); // PAT/PMT/SDT... so the stream looks real
+    uint8_t cc = 0;
+    datagrams = 0;
+    bytes = 0;
+    for (int i = 0; i < 50; ++i) {
+        const bool tcp = i % 2;
+        Bytes ip = makeIpv4(tcp ? 6 : 17, kSrc, tcp ? kDst2 : kDst, tcp ? 443 : 5000, tcp ? 1234 : 6000,
+                            tcp ? 1400 : 300, static_cast<uint8_t>(i));
+        const Bytes sec = makeMpeSection(kMac, ip, i % 5 == 0);
+        for (auto &p : sectionToTs(sec, 0x0500, cc))
+            pk.push_back(p);
+        // video-like PES packets in between must not be mistaken for MPE
+        Bytes pes = makeTsPacket(0x0101, static_cast<uint8_t>(i), 0x00, true);
+        pes[4] = 0x00;
+        pes[5] = 0x00;
+        pes[6] = 0x01;
+        pk.push_back(pes);
+        ++datagrams;
+        bytes += ip.size();
+    }
+    // A corrupted section and a scrambled one
+    Bytes bad = makeMpeSection(kMac, makeIpv4(17, kSrc, kDst, 1, 2, 50, 1), false);
+    bad[20] ^= 0xFF;
+    for (auto &p : sectionToTs(bad, 0x0500, cc))
+        pk.push_back(p);
+    for (auto &p : sectionToTs(makeMpeSection(kMac, makeIpv4(17, kSrc, kDst, 1, 2, 50, 1), false, 0x0800, true), 0x0500, cc))
+        pk.push_back(p);
+    return pk;
+}
+
+static void testMpe()
+{
+    size_t datagrams = 0, bytes = 0;
+    const auto pk = buildMpeTs(datagrams, bytes);
+    Processor proc;
+    for (const Bytes &p : pk)
+        proc.pushTs(p.data(), 1);
+    const ProcessorSnapshot s = proc.snapshot();
+    CHECK_EQ(s.streams.size(), 1u);
+    if (s.streams.empty())
+        return;
+    const StreamReport &r = s.streams[0];
+    CHECK(r.content == StreamContent::TsInput);
+    CHECK_EQ(r.mpe.datagrams, datagrams);
+    CHECK_EQ(r.mpe.llcSnap, 10u);
+    CHECK_EQ(r.mpe.crcErrors, 1u);
+    CHECK_EQ(r.mpe.scrambled, 1u);
+    CHECK_EQ(r.mpe.pids.size(), 1u);
+    if (!r.mpe.pids.empty())
+        CHECK_EQ(r.mpe.pids[0], 0x0500);
+    CHECK_EQ(r.ip.ipv4, datagrams);
+    CHECK_EQ(r.ip.ipBytes, bytes);
+    CHECK_EQ(r.ip.flowCount, 2u);
+    CHECK_EQ(r.ts.programs.size(), 2u); // tables still analysed alongside
+    bool mac = false;
+    for (const auto &l : r.ip.labels)
+        mac = mac || l.label == "01:00:5e:01:02:03";
+    CHECK(mac);
+}
+
+// pcapng: one interface per stream, packets assigned to the right one
+static void testPcapNg()
+{
+    size_t pdus = 0, ipBytes = 0;
+    const auto gseFrames = builders::gseToBbFrames(buildGsePackets(pdus, ipBytes), 3000, false, 2);
+    size_t datagrams = 0, mpeBytes = 0;
+    const auto mpeTs = buildMpeTs(datagrams, mpeBytes);
+    auto tsFrames = builders::tsToBbFrames(mpeTs, 2000);
+    for (auto &fr : tsFrames) {
+        fr[0] = 0xD0;
+        fr[1] = 1;
+        fr[9] = tbs::BbHeader::crc8(fr.data(), 9);
+    }
+    std::vector<Bytes> all = gseFrames;
+    all.insert(all.end(), tsFrames.begin(), tsFrames.end());
+
+    ProcessorConfig cfg;
+    cfg.pcap.enabled = true;
+    cfg.pcap.format = PcapFormat::PcapNg;
+    cfg.pcap.path = "tbs_test_ng.pcapng";
+    cfg.pcap.timestampSuffix = false;
+    const ProcessorSnapshot s = runFrames(all, cfg);
+    CHECK_EQ(s.pcapPackets, pdus + datagrams);
+
+    std::FILE *f = std::fopen(cfg.pcap.path.c_str(), "rb");
+    CHECK(f != nullptr);
+    if (!f)
+        return;
+    std::vector<uint8_t> b;
+    uint8_t chunk[65536];
+    size_t n;
+    while ((n = std::fread(chunk, 1, sizeof(chunk), f)) > 0)
+        b.insert(b.end(), chunk, chunk + n);
+    std::fclose(f);
+    std::remove(cfg.pcap.path.c_str());
+    CHECK_EQ(b.size(), s.pcapBytes);
+
+    auto rd32 = [&](size_t o) { return uint32_t(b[o]) | uint32_t(b[o + 1]) << 8 | uint32_t(b[o + 2]) << 16 | uint32_t(b[o + 3]) << 24; };
+    size_t pos = 0;
+    std::vector<std::string> names;
+    std::vector<size_t> perIface(4, 0);
+    bool ok = true;
+    while (pos + 12 <= b.size()) {
+        const uint32_t type = rd32(pos), len = rd32(pos + 4);
+        if (len < 12 || len % 4 || pos + len > b.size() || rd32(pos + len - 4) != len) {
+            ok = false;
+            break;
+        }
+        if (type == 1) { // IDB: if_name option
+            const uint16_t optLen = static_cast<uint16_t>(b[pos + 18] | b[pos + 19] << 8);
+            names.emplace_back(reinterpret_cast<const char *>(&b[pos + 20]), optLen);
+        } else if (type == 6) {
+            const uint32_t iface = rd32(pos + 8);
+            if (iface < perIface.size())
+                ++perIface[iface];
+        }
+        pos += len;
+    }
+    CHECK(ok);
+    CHECK_EQ(pos, b.size());
+    CHECK_EQ(rd32(0), 0x0A0D0D0Au);
+    CHECK_EQ(names.size(), 2u);
+    if (names.size() == 2) {
+        CHECK_STR(names[0], "ISI 2 GSE");
+        CHECK_STR(names[1], "ISI 1 TS MPE");
+    }
+    CHECK_EQ(perIface[0], pdus);
+    CHECK_EQ(perIface[1], datagrams);
+}
+
 int main()
 {
     testDvbText();
@@ -562,6 +698,8 @@ int main()
     testGseErrors();
     testPcap();
     testMultistreamAndFiles();
+    testMpe();
+    testPcapNg();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

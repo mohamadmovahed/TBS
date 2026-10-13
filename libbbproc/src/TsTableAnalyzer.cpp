@@ -16,7 +16,6 @@ constexpr uint16_t kPidNit = 0x0010;
 constexpr uint16_t kPidSdt = 0x0011;
 constexpr uint16_t kPidEit = 0x0012;
 constexpr uint16_t kPidTdt = 0x0014;
-constexpr size_t kMaxSection = 4096;
 constexpr size_t kMaxScheduleEvents = 500000;
 
 inline uint16_t u16(const uint8_t *p)
@@ -120,13 +119,6 @@ std::string s2Delivery(const uint8_t *d, size_t len)
 
 } // namespace
 
-struct TsTableAnalyzer::Collector
-{
-    std::vector<uint8_t> buf;
-    int lastCc = -1;
-    bool started = false;
-};
-
 TsTableAnalyzer::TsTableAnalyzer() = default;
 TsTableAnalyzer::~TsTableAnalyzer() = default;
 
@@ -165,74 +157,12 @@ void TsTableAnalyzer::pushPackets(const uint8_t *packets, size_t count)
     for (size_t n = 0; n < count; ++n) {
         const uint8_t *p = packets + n * 188;
         ++m_packets;
-        if (p[0] != 0x47 || (p[1] & 0x80))
-            continue; // not aligned or transport error
+        if (p[0] != 0x47)
+            continue; // not aligned
         const uint16_t pid = static_cast<uint16_t>(((p[1] & 0x1F) << 8) | p[2]);
         if (!wantsPid(pid))
             continue;
-        const uint8_t afc = (p[3] >> 4) & 3;
-        if (!(afc & 1))
-            continue;
-        size_t off = 4;
-        if (afc & 2)
-            off += 1 + p[4];
-        if (off >= 188)
-            continue;
-
-        auto &c = m_collectors[pid];
-        if (!c)
-            c = std::make_unique<Collector>();
-        const int cc = p[3] & 0x0F;
-        if (c->lastCc >= 0) {
-            if (cc == c->lastCc)
-                continue; // duplicate
-            if (cc != ((c->lastCc + 1) & 0x0F)) {
-                c->buf.clear();
-                c->started = false;
-            }
-        }
-        c->lastCc = cc;
-
-        const uint8_t *payload = p + off;
-        size_t plen = 188 - off;
-        auto drain = [&]() {
-            while (c->buf.size() >= 3) {
-                if (c->buf[0] == 0xFF) {
-                    c->buf.clear();
-                    c->started = false;
-                    return;
-                }
-                const size_t total = 3 + (((c->buf[1] & 0x0F) << 8) | c->buf[2]);
-                if (total > kMaxSection) {
-                    c->buf.clear();
-                    c->started = false;
-                    return;
-                }
-                if (c->buf.size() < total)
-                    return;
-                onSection(pid, c->buf.data(), total);
-                c->buf.erase(c->buf.begin(), c->buf.begin() + static_cast<std::ptrdiff_t>(total));
-            }
-        };
-
-        if (p[1] & 0x40) {
-            const size_t pointer = payload[0];
-            if (1 + pointer > plen) {
-                c->buf.clear();
-                c->started = false;
-                continue;
-            }
-            if (c->started && pointer > 0) {
-                c->buf.insert(c->buf.end(), payload + 1, payload + 1 + pointer);
-                drain();
-            }
-            c->buf.assign(payload + 1 + pointer, payload + plen);
-            c->started = true;
-            drain();
-        } else if (c->started) {
-            c->buf.insert(c->buf.end(), payload, payload + plen);
-            drain();
-        }
+        m_collectors[pid].push(p, [&](const uint8_t *s, size_t len) { onSection(pid, s, len); });
     }
 }
 

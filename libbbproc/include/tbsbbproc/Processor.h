@@ -2,6 +2,8 @@
 
 #include "Gse.h"
 #include "IpStatistics.h"
+#include "Mpe.h"
+#include "TunWriter.h"
 #include "PcapWriter.h"
 #include "PsiTypes.h"
 #include "export.h"
@@ -33,7 +35,9 @@ struct TBSBBPROC_API ProcessorConfig
 {
     bool analyzeTables = true;
     bool decodeGse = true;
+    bool decodeMpe = true;     // IP in MPE sections of transport streams
     PcapOptions pcap;
+    TunOptions tun;            // Linux TUN/TAP output of the decapsulated packets
     size_t maxFlows = 20000;  // per stream
     size_t topFlows = 100;    // flows returned in a report
 };
@@ -50,7 +54,8 @@ struct TBSBBPROC_API StreamReport
     uint64_t tsPackets = 0;      // TS packets (TS streams)
     TsReport ts;                 // PSI/SI analysis (TS streams)
     GseStats gse;                // GSE layer (generic streams)
-    IpReport ip;                 // IP statistics (GSE streams)
+    MpeStats mpe;                // MPE layer (transport streams)
+    IpReport ip;                 // IP statistics (GSE or MPE)
 };
 
 struct TBSBBPROC_API ProcessorSnapshot
@@ -62,6 +67,12 @@ struct TBSBBPROC_API ProcessorSnapshot
     uint64_t pcapPackets = 0;
     uint64_t pcapBytes = 0;
     std::string pcapError;
+    bool tunOpen = false;
+    std::string tunName;
+    uint64_t tunPackets = 0;
+    uint64_t tunErrors = 0;
+    std::string tunError;
+    std::string tunWarning;
 };
 
 // BBFrame / TS processing pipeline. Thread safe: push*() may run on a capture
@@ -74,7 +85,7 @@ public:
     Processor(const Processor &) = delete;
     Processor &operator=(const Processor &) = delete;
 
-    // Opens the pcap output if enabled
+    // Opens the pcap and TUN/TAP outputs if enabled
     bool open(std::string *error = nullptr);
     void close();
 

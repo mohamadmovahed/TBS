@@ -60,6 +60,7 @@ struct Processor::Impl
         std::vector<uint8_t> tsBuf;
         TsTableAnalyzer psi;
         GseDecapsulator gse;
+        MpeDecapsulator mpe;
         IpStatistics ip;
     };
 
@@ -68,6 +69,9 @@ struct Processor::Impl
     std::map<int, std::unique_ptr<Stream>> streams;
     std::unique_ptr<PcapWriter> pcap;
     std::string pcapError;
+    std::unique_ptr<TunWriter> tun;
+    std::string tunError;
+    std::string tunWarning;
     int64_t startMs = steadyMs();
     int64_t lastSnapshotMs = 0;
 
@@ -81,14 +85,28 @@ struct Processor::Impl
         return *s;
     }
 
-    void onPdu(Stream &s, const GsePdu &pdu)
+    void onPdu(Stream &s, const GsePdu &pdu, bool mpe)
     {
         s.ip.addPdu(pdu, steadyMs());
         if (pcap && pcap->isOpen()) {
-            pcap->write(pdu, unixMicros());
+            // pcapng: one interface per stream and encapsulation
+            const int key = s.key * 2 + (mpe ? 1 : 0);
+            std::string name;
+            if (s.key >= 0)
+                name = "ISI " + std::to_string(s.key) + " ";
+            name += mpe ? "TS MPE" : "GSE";
+            pcap->write(pdu, unixMicros(), key, name);
             if (!pcap->lastError().empty() && pcapError.empty())
                 pcapError = pcap->lastError();
         }
+        if (tun && tun->isOpen())
+            tun->write(pdu);
+    }
+
+    void pushTsToMpe(Stream &s, const uint8_t *packets, size_t count)
+    {
+        if (cfg.decodeMpe)
+            s.mpe.pushPackets(packets, count, [this, &s](const GsePdu &pdu) { onPdu(s, pdu, true); });
     }
 };
 
@@ -106,15 +124,31 @@ Processor::~Processor()
 bool Processor::open(std::string *error)
 {
     std::lock_guard<std::mutex> lock(d->mutex);
-    if (!d->cfg.pcap.enabled)
-        return true;
-    d->pcap = std::make_unique<PcapWriter>(d->cfg.pcap);
-    if (!d->pcap->open(error)) {
-        d->pcapError = error ? *error : std::string("cannot open pcap file");
-        d->pcap.reset();
-        return false;
+    bool ok = true;
+    std::string errors;
+    if (d->cfg.pcap.enabled) {
+        d->pcap = std::make_unique<PcapWriter>(d->cfg.pcap);
+        std::string e;
+        if (!d->pcap->open(&e)) {
+            d->pcapError = e;
+            d->pcap.reset();
+            errors = e;
+            ok = false;
+        }
     }
-    return true;
+    if (d->cfg.tun.enabled) {
+        d->tun = std::make_unique<TunWriter>(d->cfg.tun);
+        std::string e;
+        if (!d->tun->open(&e, &d->tunWarning)) {
+            d->tunError = e;
+            d->tun.reset();
+            errors += (errors.empty() ? "" : "; ") + e;
+            ok = false;
+        }
+    }
+    if (!ok && error)
+        *error = errors;
+    return ok;
 }
 
 void Processor::close()
@@ -122,6 +156,8 @@ void Processor::close()
     std::lock_guard<std::mutex> lock(d->mutex);
     if (d->pcap)
         d->pcap->close();
+    if (d->tun)
+        d->tun->close();
 }
 
 void Processor::reset()
@@ -148,19 +184,21 @@ void Processor::pushBbFrame(const uint8_t *frame, size_t len, const tbs::BbHeade
     switch (hdr.streamType()) {
     case tbs::BbHeader::StreamType::Transport: {
         s.sawTsType = true;
-        if (!d->cfg.analyzeTables)
+        if (!d->cfg.analyzeTables && !d->cfg.decodeMpe)
             break;
         s.tsBuf.clear();
         s.bb2ts.pushFrame(frame, len, hdr, [&s](const uint8_t *pkt) { s.tsBuf.insert(s.tsBuf.end(), pkt, pkt + 188); });
-        if (!s.tsBuf.empty())
+        if (!s.tsBuf.empty()) {
             s.psi.pushPackets(s.tsBuf.data(), s.tsBuf.size() / 188);
+            d->pushTsToMpe(s, s.tsBuf.data(), s.tsBuf.size() / 188);
+        }
         break;
     }
     case tbs::BbHeader::StreamType::GenericContinuous:
     case tbs::BbHeader::StreamType::GseHem:
         if (d->cfg.decodeGse) {
             const bool hem = hdr.streamType() == tbs::BbHeader::StreamType::GseHem;
-            s.gse.pushDataField(df, dfLen, hem, hdr.syncd, [this, &s](const GsePdu &pdu) { d->onPdu(s, pdu); });
+            s.gse.pushDataField(df, dfLen, hem, hdr.syncd, [this, &s](const GsePdu &pdu) { d->onPdu(s, pdu, false); });
         }
         break;
     case tbs::BbHeader::StreamType::GenericPacketized:
@@ -176,6 +214,7 @@ void Processor::pushTs(const uint8_t *packets, size_t count)
     s.dataBytes += count * 188;
     if (d->cfg.analyzeTables)
         s.psi.pushPackets(packets, count);
+    d->pushTsToMpe(s, packets, count);
 }
 
 ProcessorSnapshot Processor::snapshot()
@@ -199,6 +238,7 @@ ProcessorSnapshot Processor::snapshot()
         r.hasHeader = s.hasHeader;
         r.lastHeader = s.header;
         r.gse = s.gse.stats();
+        r.mpe = s.mpe.stats();
         r.tsPackets = s.psi.packets();
 
         if (s.key == kTsInputKey) {
@@ -214,7 +254,7 @@ ProcessorSnapshot Processor::snapshot()
         }
         if (r.content == StreamContent::TransportStream || r.content == StreamContent::TsInput)
             r.ts = s.psi.report();
-        if (r.content == StreamContent::Gse || r.gse.pdus > 0)
+        if (r.content == StreamContent::Gse || r.gse.pdus > 0 || r.mpe.datagrams > 0)
             r.ip = s.ip.report(d->cfg.topFlows, now);
         snap.streams.push_back(std::move(r));
     }
@@ -226,6 +266,14 @@ ProcessorSnapshot Processor::snapshot()
         snap.pcapBytes = d->pcap->bytes();
     }
     snap.pcapError = d->pcapError;
+    if (d->tun) {
+        snap.tunOpen = d->tun->isOpen();
+        snap.tunName = d->tun->name();
+        snap.tunPackets = d->tun->packets();
+        snap.tunErrors = d->tun->errors();
+    }
+    snap.tunError = d->tunError;
+    snap.tunWarning = d->tunWarning;
     return snap;
 }
 

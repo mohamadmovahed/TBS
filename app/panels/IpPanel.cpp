@@ -102,8 +102,8 @@ IpPanel::IpPanel(QWidget *parent)
     m_stack = new QStackedWidget;
     outer->addWidget(m_stack);
 
-    auto *empty = new QLabel(tr("No GSE stream found yet.\nIP statistics appear here while capturing BBFrames of a "
-                                "Generic Stream that carries GSE."));
+    auto *empty = new QLabel(tr("No IP data found yet.\nIP statistics appear here for GSE (BBFrames of a generic stream) "
+                                "or MPE (IP sections inside a transport stream)."));
     empty->setObjectName(QStringLiteral("Muted"));
     empty->setAlignment(Qt::AlignCenter);
     m_stack->addWidget(empty);
@@ -128,8 +128,8 @@ IpPanel::IpPanel(QWidget *parent)
     tiles->setSpacing(12);
     m_rate = new MetricTile(tr("IP rate"));
     m_pps = new MetricTile(tr("Packets / s"));
-    m_pdus = new MetricTile(tr("GSE PDUs"));
-    m_errors = new MetricTile(tr("GSE errors"));
+    m_pdus = new MetricTile(tr("IP PDUs"));
+    m_errors = new MetricTile(tr("Errors"));
     m_rate->setValueFormat(2, QStringLiteral("Mbit/s"));
     m_pps->setValueFormat(0, QStringLiteral("pkt/s"));
     m_pdus->setValueFormat(0, tr("PDUs"));
@@ -185,7 +185,8 @@ void IpPanel::updateSnapshot(const ProcessorSnapshot &snap)
     std::vector<int> isis;
     std::vector<const StreamReport *> reports;
     for (const auto &s : snap.streams) {
-        if (s.content == StreamContent::Gse || s.content == StreamContent::GenericContinuous || s.gse.pdus > 0) {
+        if (s.content == StreamContent::Gse || s.content == StreamContent::GenericContinuous || s.gse.pdus > 0
+            || s.mpe.datagrams > 0) {
             isis.push_back(s.isi);
             reports.push_back(&s);
         }
@@ -195,13 +196,24 @@ void IpPanel::updateSnapshot(const ProcessorSnapshot &snap)
         const QSignalBlocker block(m_stream);
         const int previous = m_stream->currentIndex();
         m_stream->clear();
-        for (int isi : isis)
-            m_stream->addItem(isi < 0 ? tr("Generic stream") : tr("ISI %1 · generic stream").arg(isi));
+        for (size_t i = 0; i < isis.size(); ++i) {
+            const bool mpe = reports[i]->mpe.datagrams > 0;
+            const QString kind = mpe ? tr("MPE in TS") : tr("generic stream");
+            m_stream->addItem(isis[i] < 0 ? kind : tr("ISI %1 · %2").arg(isis[i]).arg(kind));
+        }
         m_stream->setCurrentIndex(std::clamp(previous, 0, std::max(0, m_stream->count() - 1)));
         m_stream->setVisible(isis.size() > 1);
     }
 
     const Theme::Tokens &tk = Theme::tokens();
+    QString tun;
+    if (snap.tunOpen)
+        tun = tr(" &nbsp;·&nbsp; interface <b>%1</b> · %2 packets%3")
+                  .arg(qs(snap.tunName).toHtmlEscaped())
+                  .arg(count(snap.tunPackets))
+                  .arg(snap.tunErrors ? tr(" · %1 not delivered").arg(count(snap.tunErrors)) : QString());
+    else if (!snap.tunError.empty())
+        tun = QStringLiteral(" &nbsp;·&nbsp; <span style='color:%1'>● %2</span>").arg(tk.critical.name(), qs(snap.tunError).toHtmlEscaped());
     if (!snap.pcapFile.empty())
         m_pcap->setText(tr("pcap <b>%1</b> · %2 packets · %3%4")
                             .arg(qs(snap.pcapFile).toHtmlEscaped())
@@ -209,11 +221,13 @@ void IpPanel::updateSnapshot(const ProcessorSnapshot &snap)
                             .arg(bytes(snap.pcapBytes))
                             .arg(snap.pcapError.empty() ? QString()
                                                         : QStringLiteral(" · <span style='color:%1'>● %2</span>")
-                                                              .arg(tk.critical.name(), qs(snap.pcapError).toHtmlEscaped())));
+                                                              .arg(tk.critical.name(), qs(snap.pcapError).toHtmlEscaped()))
+                        + tun);
     else
-        m_pcap->setText(snap.pcapError.empty() ? tr("pcap output is off (Outputs → Extract IP to pcap)")
-                                               : QStringLiteral("<span style='color:%1'>● %2</span>")
-                                                     .arg(tk.critical.name(), qs(snap.pcapError).toHtmlEscaped()));
+        m_pcap->setText((snap.pcapError.empty() ? tr("pcap output is off (Outputs → Write IP to pcap)")
+                                                : QStringLiteral("<span style='color:%1'>● %2</span>")
+                                                      .arg(tk.critical.name(), qs(snap.pcapError).toHtmlEscaped()))
+                        + tun);
 
     if (reports.empty()) {
         m_stack->setCurrentIndex(0);
@@ -225,16 +239,30 @@ void IpPanel::updateSnapshot(const ProcessorSnapshot &snap)
     const GseStats &g = r.gse;
     const IpReport &ip = r.ip;
 
-    // GSE health line
+    // GSE / MPE health line
     const bool isGse = r.content == StreamContent::Gse;
+    const bool isMpe = r.mpe.datagrams > 0;
     QStringList parts;
-    parts << QStringLiteral("<b>%1</b>").arg(isGse ? tr("GSE detected") : tr("Generic stream (not GSE)"));
-    parts << tr("data fields %1 (%2 valid)").arg(count(g.dataFields), count(g.validDataFields));
-    parts << tr("GSE packets %1").arg(count(g.packets));
-    parts << tr("reassembled %1").arg(count(g.reassembled));
-    parts << tr("padding %1").arg(bytes(g.paddingBytes));
-    parts << tr("labels 6B/3B/bcast/re-use %1/%2/%3/%4")
-                 .arg(count(g.labelTypes[0]), count(g.labelTypes[1]), count(g.labelTypes[2]), count(g.labelTypes[3]));
+    if (isMpe) {
+        QStringList pids;
+        for (uint16_t p : r.mpe.pids)
+            pids << QStringLiteral("0x%1").arg(p, 4, 16, QLatin1Char('0'));
+        parts << QStringLiteral("<b>%1</b>").arg(tr("MPE on PID %1").arg(pids.join(QStringLiteral(", "))));
+        parts << tr("sections %1").arg(count(r.mpe.sections));
+        parts << tr("datagrams %1 (LLC/SNAP %2)").arg(count(r.mpe.datagrams), count(r.mpe.llcSnap));
+        parts << tr("CRC errors %1").arg(count(r.mpe.crcErrors));
+        if (r.mpe.scrambled)
+            parts << tr("scrambled %1").arg(count(r.mpe.scrambled));
+    }
+    if (!isMpe || g.dataFields) {
+        parts << QStringLiteral("<b>%1</b>").arg(isGse ? tr("GSE detected") : tr("Generic stream (not GSE)"));
+        parts << tr("data fields %1 (%2 valid)").arg(count(g.dataFields), count(g.validDataFields));
+        parts << tr("GSE packets %1").arg(count(g.packets));
+        parts << tr("reassembled %1").arg(count(g.reassembled));
+        parts << tr("padding %1").arg(bytes(g.paddingBytes));
+        parts << tr("labels 6B/3B/bcast/re-use %1/%2/%3/%4")
+                     .arg(count(g.labelTypes[0]), count(g.labelTypes[1]), count(g.labelTypes[2]), count(g.labelTypes[3]));
+    }
     if (ip.nonIp)
         parts << tr("non-IP %1").arg(count(ip.nonIp));
     m_gse->setText(parts.join(QStringLiteral(" &nbsp;·&nbsp; ")));
@@ -246,16 +274,19 @@ void IpPanel::updateSnapshot(const ProcessorSnapshot &snap)
     m_pps->setValue(QString::number(ip.packetsPerSec, 'f', 0), tr("pkt/s"));
     m_pps->addSample(ip.packetsPerSec);
     m_pps->setSubtitle(tr("IPv4 %1 · IPv6 %2 · multicast %3").arg(count(ip.ipv4), count(ip.ipv6), count(ip.multicast)));
-    m_pdus->setValue(count(g.pdus));
-    m_pdus->setSubtitle(tr("%1 complete · %2 reassembled").arg(count(g.completePdus), count(g.reassembled)));
+    m_pdus->setValue(count(ip.pdus));
+    m_pdus->setSubtitle(isMpe ? tr("%1 MPE sections").arg(count(r.mpe.sections))
+                              : tr("%1 complete · %2 reassembled").arg(count(g.completePdus), count(g.reassembled)));
     m_pdus->addSample(ip.packetsPerSec);
-    const uint64_t errors = g.crcErrors + g.lengthErrors + g.fragmentErrors + ip.malformed + g.invalidDataFields;
+    const uint64_t errors = g.crcErrors + g.lengthErrors + g.fragmentErrors + ip.malformed + g.invalidDataFields
+        + r.mpe.crcErrors + r.mpe.invalid;
     const uint64_t fresh = errors >= m_lastErrors ? errors - m_lastErrors : 0;
     m_lastErrors = errors;
     m_errors->setValue(count(errors), tr("total"));
     m_errors->addSample(static_cast<double>(fresh));
     m_errors->setSubtitle(tr("CRC %1 · length %2 · fragment %3 · malformed IP %4")
-                              .arg(count(g.crcErrors), count(g.lengthErrors), count(g.fragmentErrors), count(ip.malformed)));
+                              .arg(count(g.crcErrors + r.mpe.crcErrors), count(g.lengthErrors + r.mpe.invalid),
+                                   count(g.fragmentErrors), count(ip.malformed)));
     m_errors->setStatus(fresh ? MetricTile::Status::Critical : MetricTile::Status::Good, fresh ? tr("Errors") : tr("Clean"));
 
     // Protocols (IP protocols, then non-IP EtherTypes)

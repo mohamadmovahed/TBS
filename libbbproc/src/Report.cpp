@@ -105,6 +105,16 @@ std::string formatReport(const ProcessorSnapshot &s, bool verbose)
                      static_cast<unsigned long long>(g.crcErrors), static_cast<unsigned long long>(g.lengthErrors),
                      static_cast<unsigned long long>(g.fragmentErrors));
         }
+        if (st.mpe.sections) {
+            const MpeStats &m = st.mpe;
+            std::string pids;
+            for (uint16_t p : m.pids)
+                pids += fmt(" 0x%04X", p);
+            o += fmt("MPE: PIDs%s, sections %llu, datagrams %llu (LLC/SNAP %llu), CRC errors %llu, scrambled %llu\n",
+                     pids.c_str(), static_cast<unsigned long long>(m.sections), static_cast<unsigned long long>(m.datagrams),
+                     static_cast<unsigned long long>(m.llcSnap), static_cast<unsigned long long>(m.crcErrors),
+                     static_cast<unsigned long long>(m.scrambled));
+        }
         if (st.ip.pdus) {
             const IpReport &ip = st.ip;
             o += fmt("IP: IPv4 %llu, IPv6 %llu, non-IP %llu, malformed %llu, %s, flows %u\n",
@@ -125,6 +135,10 @@ std::string formatReport(const ProcessorSnapshot &s, bool verbose)
     if (!s.pcapFile.empty())
         o += fmt("pcap: %s, %llu packets, %s%s\n", s.pcapFile.c_str(), static_cast<unsigned long long>(s.pcapPackets),
                  bytes(s.pcapBytes).c_str(), s.pcapError.empty() ? "" : (" (error: " + s.pcapError + ")").c_str());
+    if (!s.tunName.empty() || !s.tunError.empty())
+        o += s.tunError.empty() ? fmt("tun: %s, %llu packets, %llu errors\n", s.tunName.c_str(),
+                                      static_cast<unsigned long long>(s.tunPackets), static_cast<unsigned long long>(s.tunErrors))
+                                : "tun: error: " + s.tunError + "\n";
     return o;
 }
 

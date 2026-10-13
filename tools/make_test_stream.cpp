@@ -5,6 +5,8 @@
 //       --add-si inserts NIT, EIT present/following, TDT, CAT and BAT tables.
 //   tbs-make-test-stream --out FILE --gse [--hem] [--pdus N]
 //       Generic stream with GSE-encapsulated IP traffic (UDP multicast, TCP, IPv6, ARP).
+//   tbs-make-test-stream --out FILE --mpe [--in input.ts] [--pdus N]
+//       Adds MPE IP traffic (PID 0x0500) to the transport stream before wrapping it.
 //   tbs-make-test-stream --out FILE --mis --in input.ts
 //       Multistream carrier: the TS on ISI 1 and GSE IP traffic on ISI 2.
 //
@@ -183,6 +185,36 @@ std::vector<Bytes> gseTraffic(size_t pdus)
     return g;
 }
 
+// --- MPE traffic interleaved into a TS ---
+std::vector<Bytes> withMpe(const std::vector<Bytes> &in, size_t datagrams)
+{
+    const uint8_t mcastMac[6] = {0x01, 0x00, 0x5e, 0x02, 0x02, 0x02};
+    const uint8_t hostMac[6] = {0x02, 0x00, 0xc0, 0xa8, 0x14, 0x07};
+    const uint8_t src[4] = {172, 16, 0, 1};
+    const uint8_t grp[4] = {239, 2, 2, 2};
+    const uint8_t host[4] = {192, 168, 20, 7};
+    std::vector<Bytes> mpe;
+    uint8_t cc = 0;
+    for (size_t i = 0; i < datagrams; ++i) {
+        const bool tcp = i % 4 == 3;
+        Bytes ip = builders::makeIpv4(tcp ? 6 : 17, src, tcp ? host : grp, tcp ? 80 : 7000, tcp ? 40100 : 7000,
+                                      tcp ? 1400 : 1000, static_cast<uint8_t>(i));
+        for (auto &p : builders::sectionToTs(builders::makeMpeSection(tcp ? hostMac : mcastMac, ip, i % 8 == 0), 0x0500, cc))
+            mpe.push_back(p);
+    }
+    std::vector<Bytes> out;
+    const size_t total = in.size() + mpe.size();
+    size_t a = 0, b = 0;
+    for (size_t i = 0; i < total; ++i) {
+        // spread the MPE packets evenly through the input
+        if (b < mpe.size() && (a >= in.size() || b * in.size() <= a * mpe.size()))
+            out.push_back(mpe[b++]);
+        else
+            out.push_back(in[a++]);
+    }
+    return out;
+}
+
 std::vector<Bytes> readTs(const std::string &in)
 {
     std::vector<Bytes> packets;
@@ -213,6 +245,7 @@ int main(int argc, char **argv)
     bool gse = false;
     bool mis = false;
     bool addSi = false;
+    bool mpe = false;
     bool raw = false;
     size_t synthPackets = 20000;
     size_t pdus = 20000;
@@ -240,6 +273,8 @@ int main(int argc, char **argv)
             mis = true;
         else if (a == "--add-si")
             addSi = true;
+        else if (a == "--mpe")
+            mpe = true;
         else if (a == "--raw")
             raw = true;
         else if (a == "--packets")
@@ -253,7 +288,7 @@ int main(int argc, char **argv)
     }
     if (out.empty() || dfl < 16 || dfl > 7264) {
         std::cerr << "usage: " << argv[0]
-                  << " --out FILE [--in input.ts] [--add-si] [--gse] [--mis] [--hem] [--dfl 16..7264] [--packets N]"
+                  << " --out FILE [--in input.ts] [--add-si] [--mpe] [--gse] [--mis] [--hem] [--dfl 16..7264] [--packets N]"
                      " [--pdus N] [--raw]\n";
         return 2;
     }
@@ -269,6 +304,8 @@ int main(int argc, char **argv)
         }
         if (addSi || mis)
             packets = withSi(packets, 20.0);
+        if (mpe)
+            packets = withMpe(packets, pdus);
         std::cout << packets.size() << " TS packets";
         return builders::tsToBbFrames(packets, dfl, hem);
     };

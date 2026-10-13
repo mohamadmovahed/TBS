@@ -24,6 +24,13 @@ int main(int argc, char **argv)
             cfg.pcap.enabled = true;
             cfg.pcap.path = argv[++i];
             cfg.pcap.timestampSuffix = false;
+        } else if (a == "--pcapng") {
+            cfg.pcap.format = tbs::bb::PcapFormat::PcapNg;
+        } else if (a == "--tun" && i + 1 < argc) {
+            cfg.tun.enabled = true;
+            cfg.tun.name = argv[++i];
+        } else if (a == "--tap") {
+            cfg.tun.tap = true;
         } else if (a == "--raw-ip") {
             cfg.pcap.ethernetFraming = false;
         } else if (a == "--all-pdus") {
@@ -41,9 +48,10 @@ int main(int argc, char **argv)
         }
     }
     if (input.empty()) {
-        std::printf("Usage: %s CAPTURE [--pcap FILE] [--raw-ip] [--all-pdus] [--verbose]\n"
+        std::printf("Usage: %s CAPTURE [--pcap FILE] [--pcapng] [--raw-ip] [--all-pdus] [--tun NAME [--tap]] [--verbose]\n"
                     "  CAPTURE    TS, pseudo-TS, raw BBFrames or 0xB8 BBFrames\n"
-                    "  --pcap     write IP packets carried in GSE to FILE\n"
+                    "  --pcap     write IP packets carried in GSE or MPE to FILE (--pcapng: one interface per stream)\n"
+                    "  --tun      replay the IP packets into a Linux TUN (or --tap) interface\n"
                     "  --raw-ip   pcap with raw IP packets instead of Ethernet framing\n"
                     "  --all-pdus include non-IP PDUs (Ethernet framing only)\n"
                     "  --verbose  all flows and the table list\n",

@@ -129,7 +129,9 @@ void OverviewPanel::updateContent(const tbs::bb::ProcessorSnapshot &snap)
     for (const auto &s : snap.streams) {
         if (s.content == tbs::bb::StreamContent::TsInput)
             continue;
-        const QString what = QString::fromLatin1(tbs::bb::streamContentName(s.content));
+        QString what = QString::fromLatin1(tbs::bb::streamContentName(s.content));
+        if (s.mpe.datagrams)
+            what += tr(" + MPE (IP)");
         parts << (s.isi < 0 ? QStringLiteral("<b>%1</b>").arg(what) : QStringLiteral("ISI %1: <b>%2</b>").arg(s.isi).arg(what));
     }
     if (!parts.isEmpty())

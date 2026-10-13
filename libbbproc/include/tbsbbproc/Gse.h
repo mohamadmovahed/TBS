@@ -24,6 +24,10 @@ struct TBSBBPROC_API GsePdu
     uint8_t labelLen = 0;
 };
 
+// Synthetic Ethernet header for a non-bridged PDU: destination = 6-byte label (MAC),
+// 3-byte label in the low bytes, broadcast otherwise; source 00:00:00:00:00:00.
+TBSBBPROC_API void ethernetHeaderFor(const GsePdu &pdu, uint8_t out[14]);
+
 struct TBSBBPROC_API GseStats
 {
     uint64_t dataFields = 0;      // BBFrame data fields processed

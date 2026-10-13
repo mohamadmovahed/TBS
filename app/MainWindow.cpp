@@ -407,15 +407,20 @@ void MainWindow::startCapture()
     m_statusText->setText(QString::fromStdString(m_config.tuning.describe()));
 
     // Content processing: TS tables, GSE decapsulation, IP statistics, pcap
-    tbs::bb::ProcessorConfig pc = m_output->processing();
-    if (m_config.capture != tbs::CaptureMode::BBFrame)
-        pc.pcap.enabled = false; // GSE only exists in BBFrame captures
+    const tbs::bb::ProcessorConfig pc = m_output->processing();
     m_processor = std::make_shared<tbs::bb::Processor>(pc);
     std::string perr;
     if (!m_processor->open(&perr))
-        appendLog(tr("ERROR: pcap output: %1").arg(QString::fromStdString(perr)));
-    else if (pc.pcap.enabled)
-        appendLog(tr("Extracting GSE IP packets to %1").arg(QString::fromStdString(tbs::bb::PcapWriter::resolvePath(pc.pcap))));
+        appendLog(tr("ERROR: IP output: %1").arg(QString::fromStdString(perr)));
+    {
+        const tbs::bb::ProcessorSnapshot first = m_processor->snapshot();
+        if (pc.pcap.enabled && first.pcapOpen)
+            appendLog(tr("Writing IP packets (GSE/MPE) to %1").arg(QString::fromStdString(first.pcapFile)));
+        if (first.tunOpen)
+            appendLog(tr("Sending IP packets to interface %1").arg(QString::fromStdString(first.tunName)));
+        if (!first.tunWarning.empty())
+            appendLog(tr("WARNING: %1").arg(QString::fromStdString(first.tunWarning)));
+    }
     m_controller->setProcessor(m_processor);
     m_services->reset();
     m_ip->reset();

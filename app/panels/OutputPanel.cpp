@@ -131,7 +131,7 @@ OutputPanel::OutputPanel(QWidget *parent)
 
     // ---- GSE -> pcap ----
     m_pcapOn = new ToggleSwitch;
-    root->addLayout(sectionHeader(tr("Extract IP to pcap"), m_pcapOn));
+    root->addLayout(sectionHeader(tr("Write IP to pcap"), m_pcapOn));
     m_pcapBox = new QWidget;
     auto *pc = makeForm();
     m_pcapBox->setLayout(pc);
@@ -144,6 +144,10 @@ OutputPanel::OutputPanel(QWidget *parent)
     prow->addWidget(m_pcapPath, 1);
     prow->addWidget(pbrowse);
     pc->addRow(keyLabel(tr("File")), prow);
+    m_pcapFormat = new QComboBox;
+    m_pcapFormat->addItem(tr("pcap"), static_cast<int>(tbs::bb::PcapFormat::Pcap));
+    m_pcapFormat->addItem(tr("pcapng (one interface per stream)"), static_cast<int>(tbs::bb::PcapFormat::PcapNg));
+    pc->addRow(keyLabel(tr("Format")), m_pcapFormat);
     m_pcapFraming = new QComboBox;
     m_pcapFraming->addItem(tr("Ethernet (GSE label as MAC)"), true);
     m_pcapFraming->addItem(tr("Raw IP"), false);
@@ -153,8 +157,32 @@ OutputPanel::OutputPanel(QWidget *parent)
     m_pcapTimestamp = new QCheckBox(tr("Append date and time"));
     pc->addRow(QString(), m_pcapTimestamp);
     root->addWidget(m_pcapBox);
-    root->addWidget(hintLabel(tr("BBFrame capture of a GSE stream: IP packets are written for Wireshark/tcpdump. "
-                                 "Transport streams are analysed (Services tab) regardless of this setting.")));
+    root->addWidget(hintLabel(tr("IP packets from GSE (BBFrame capture of a generic stream) or MPE (inside a transport "
+                                 "stream) are written for Wireshark/tcpdump.")));
+
+    // ---- TUN/TAP ----
+    m_tunOn = new ToggleSwitch;
+    root->addLayout(sectionHeader(tr("Send IP to network interface"), m_tunOn));
+    m_tunBox = new QWidget;
+    auto *tf = makeForm();
+    m_tunBox->setLayout(tf);
+    m_tunName = new QLineEdit;
+    m_tunName->setPlaceholderText(QStringLiteral("tbs0"));
+    tf->addRow(keyLabel(tr("Interface")), m_tunName);
+    m_tunMode = new QComboBox;
+    m_tunMode->addItem(tr("TUN (IP packets)"), false);
+    m_tunMode->addItem(tr("TAP (Ethernet, label as MAC)"), true);
+    tf->addRow(keyLabel(tr("Mode")), m_tunMode);
+    root->addWidget(m_tunBox);
+    if (tbs::bb::TunWriter::supported()) {
+        root->addWidget(hintLabel(tr("Received IP packets appear on this interface for routing, multicast receivers or "
+                                     "tcpdump. Without root, create it once: <tt>sudo ip tuntap add dev tbs0 mode tun user "
+                                     "$USER</tt>")));
+    } else {
+        m_tunOn->setEnabled(false);
+        root->addWidget(hintLabel(tr("TUN/TAP output is only available on Linux.")));
+    }
+    connect(m_tunOn, &ToggleSwitch::toggled, this, &OutputPanel::updateEnabled);
     connect(pbrowse, &QPushButton::clicked, this, [this]() {
         const QString f = QFileDialog::getSaveFileName(this, tr("pcap file"), m_pcapPath->text(), tr("pcap (*.pcap);;All files (*)"));
         if (!f.isEmpty())
@@ -245,6 +273,10 @@ void OutputPanel::setProcessing(const tbs::bb::ProcessorConfig &cfg)
     m_pcapFraming->setCurrentIndex(m_pcapFraming->findData(cfg.pcap.ethernetFraming));
     m_pcapNonIp->setChecked(!cfg.pcap.ipOnly);
     m_pcapTimestamp->setChecked(cfg.pcap.timestampSuffix);
+    m_pcapFormat->setCurrentIndex(m_pcapFormat->findData(static_cast<int>(cfg.pcap.format)));
+    m_tunOn->setChecked(cfg.tun.enabled && tbs::bb::TunWriter::supported());
+    m_tunName->setText(QString::fromStdString(cfg.tun.name));
+    m_tunMode->setCurrentIndex(m_tunMode->findData(cfg.tun.tap));
     updateEnabled();
 }
 
@@ -256,6 +288,11 @@ tbs::bb::ProcessorConfig OutputPanel::processing() const
     cfg.pcap.ethernetFraming = m_pcapFraming->currentData().toBool();
     cfg.pcap.ipOnly = !m_pcapNonIp->isChecked();
     cfg.pcap.timestampSuffix = m_pcapTimestamp->isChecked();
+    cfg.pcap.format = static_cast<tbs::bb::PcapFormat>(m_pcapFormat->currentData().toInt());
+    cfg.tun.enabled = m_tunOn->isChecked() && tbs::bb::TunWriter::supported();
+    const QString tunName = m_tunName->text().trimmed();
+    cfg.tun.name = tunName.isEmpty() ? std::string("tbs0") : tunName.toStdString();
+    cfg.tun.tap = m_tunMode->currentData().toBool();
     return cfg;
 }
 
@@ -263,6 +300,7 @@ void OutputPanel::setEditable(bool editable)
 {
     m_editable = editable;
     m_pcapOn->setEnabled(editable);
+    m_tunOn->setEnabled(editable && tbs::bb::TunWriter::supported());
     m_fileOn->setEnabled(editable);
     m_zmqOn->setEnabled(editable && ZmqSink::available());
     updateEnabled();
@@ -283,6 +321,7 @@ void OutputPanel::updateEnabled()
     m_zmqBox->setEnabled(m_editable && m_zmqOn->isChecked());
     m_packetsPerMsg->setEnabled(m_mode == CaptureMode::TransportStream);
     m_pcapBox->setEnabled(m_editable && m_pcapOn->isChecked());
+    m_tunBox->setEnabled(m_editable && m_tunOn->isChecked());
     m_keepFiles->setEnabled(m_splitSize->value() > 0 || m_splitMinutes->value() > 0);
     m_pcapNonIp->setEnabled(m_pcapFraming->currentData().toBool());
 }

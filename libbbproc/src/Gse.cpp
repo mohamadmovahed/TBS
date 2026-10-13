@@ -22,6 +22,19 @@ size_t labelBytes(uint8_t lt)
 }
 } // namespace
 
+void ethernetHeaderFor(const GsePdu &pdu, uint8_t out[14])
+{
+    std::memset(out, 0, 14);
+    if (pdu.labelLen == 6)
+        std::memcpy(out, pdu.label, 6);
+    else if (pdu.labelLen == 3)
+        std::memcpy(out + 3, pdu.label, 3);
+    else
+        std::memset(out, 0xFF, 6);
+    out[12] = static_cast<uint8_t>(pdu.protocolType >> 8);
+    out[13] = static_cast<uint8_t>(pdu.protocolType);
+}
+
 void GseDecapsulator::reset()
 {
     m_stats = GseStats();

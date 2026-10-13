@@ -5,7 +5,7 @@ Software for **TBS 6903x** (STiD135) DVB-S2/S2X receivers, in four parts:
 | Part | What it is | Depends on |
 |------|------------|------------|
 | **`tbsdvb`** library (`libtbsdvb/`) | Tunes the card, reads status, captures TS or BBFrames, writes files, publishes over ZeroMQ. C++17 API plus a C API. | C++17 standard library; optionally libzmq. **No Qt.** |
-| **`tbsbbproc`** library (`libbbproc/`) | Processes BBFrames: detects TS or Generic Stream per ISI. Analyses PSI/SI tables of TS streams. Decapsulates GSE, extracts IP to pcap, keeps IP statistics. | `tbsdvb`; C++17 only. **No Qt, no hardware.** |
+| **`tbsbbproc`** library (`libbbproc/`) | Processes BBFrames: detects TS or Generic Stream per ISI. Analyses PSI/SI tables of TS streams. Decapsulates GSE and MPE, writes IP to pcap/pcapng or a TUN/TAP interface, keeps IP statistics. | `tbsdvb`; C++17 only. **No Qt, no hardware.** |
 | **`tbs-receiver`** (`app/`) | Desktop GUI built on the library. | Qt 6 (or 5.15); optionally FFmpeg for video. |
 | **`tbs-cli`**, **`tbs-bbproc`** (`tools/`) | Headless capture front end, and offline capture-file analysis. | the libraries only |
 
@@ -221,7 +221,7 @@ Each BBFrame is routed by its MATYPE to a pipeline for its input stream (ISI), s
 
 | MATYPE TS/GS | Detected content | Processing |
 |---|---|---|
-| `11` Transport | **Transport stream** | Rebuilds the TS packets, then analyses the PSI/SI tables |
+| `11` Transport | **Transport stream** | Rebuilds the TS packets, analyses the PSI/SI tables and decapsulates MPE |
 | `01` Generic continuous, `10` GSE-HEM | **GSE (IP)** if the data fields parse as GSE; otherwise *generic continuous (not GSE)* | GSE decapsulation, then IP statistics and pcap |
 | `00` Generic packetized | *Generic packetized* | Counted only |
 
@@ -249,40 +249,69 @@ A plain TS capture (TS mode) goes through the same table analysis.
   - labels and multicast;
   - the GSE error counters.
 
-**pcap**: classic libpcap, readable by Wireshark and tcpdump. It comes in two flavours:
-- **Ethernet framing:** the 6-byte GSE label becomes the destination MAC, and bridged frames are written as received.
+**MPE** (EN 301 192) in transport streams, both plain TS captures and TS carried in BBFrames:
+- **PIDs:** found automatically from sections with table ID 0x3E (up to 64 PIDs).
+- **Sections:** CRC-checked; scrambled sections are counted and skipped.
+- **Datagrams:** IPv4/IPv6, with or without LLC/SNAP. The MAC address becomes the label.
+- **Output:** the datagrams go to the same IP statistics, pcap and TUN output as GSE.
+
+**pcap**: readable by Wireshark and tcpdump. It comes in two formats:
+- **pcap:** classic libpcap.
+- **pcapng:** one interface per stream, named for example `ISI 2 GSE` or `ISI 1 TS MPE`, so Wireshark can filter on
+  `frame.interface_name`.
+
+And in two framings:
+- **Ethernet framing:** the 6-byte GSE label (or MPE MAC address) becomes the destination MAC, and bridged frames are
+  written as received.
 - **Raw IP.**
 
 The file is flushed every second, so you can open it while the capture is running.
+
+**TUN/TAP** (Linux): the IP packets are written into a virtual interface, so ordinary tools and applications
+(tcpdump, VLC, a multicast receiver) see the satellite traffic as if it came from a network card.
+- **TUN** gets the IP packets.
+- **TAP** gets Ethernet frames, with the label as the destination MAC.
+
+The interface is created and brought up if it does not exist. That needs root or `CAP_NET_ADMIN`. To run without
+root, create a persistent interface once:
+```sh
+sudo ip tuntap add dev tbs0 mode tun user $USER && sudo ip link set tbs0 up
+```
+Multicast traffic then also needs a route, for example `sudo ip route add 239.0.0.0/8 dev tbs0`.
 
 ```cpp
 #include <tbsbbproc/Processor.h>
 
 tbs::bb::ProcessorConfig pc;
 pc.pcap.enabled = true;
-pc.pcap.path = "gse.pcap";
+pc.pcap.path = "ip.pcapng";
+pc.pcap.format = tbs::bb::PcapFormat::PcapNg;
+pc.tun.enabled = true;          // Linux: also send the packets to interface tbs0
+pc.tun.name = "tbs0";
 tbs::bb::Processor proc(pc);
 proc.open();
 // feed it from tbs::Receiver callbacks (or any BBFrame source) ...
 cb.onBbFrame = [&](const uint8_t *f, size_t n, const tbs::BbHeader &h) { proc.pushBbFrame(f, n, h); };
 // ... and poll from any thread
-tbs::bb::ProcessorSnapshot s = proc.snapshot();   // per-ISI: content, TsReport, GseStats, IpReport
+tbs::bb::ProcessorSnapshot s = proc.snapshot();   // per-ISI: content, TsReport, GseStats, MpeStats, IpReport
 ```
 
 **Offline analysis** of a recording works with plain TS, the card's pseudo-TS, raw BBFrames, or `0xB8`-prefixed
 BBFrames:
 ```sh
 ./build/tbs-bbproc capture.ts --pcap ip.pcap      # report + pcap; --verbose lists all flows and tables
+./build/tbs-bbproc capture.ts --pcap ip.pcapng --pcapng --tun tbs0   # pcapng per stream, replay into tbs0
 ./build/tbs-cli --device linux:0:0 --freq 10971 --sr 29700 --pol h --bbframe --pcap ip.pcap   # live
+./build/tbs-cli --device linux:0:0 --freq 10971 --sr 29700 --pol h --tun tbs0      # live MPE (TS mode) into tbs0
 ```
 
 **In the GUI:**
 - the **Services** tab shows the TS content;
-- the **IP / GSE** tab shows rates, protocols, labels, top flows, GSE health and the pcap status;
+- the **IP / GSE** tab shows rates, protocols, labels, top flows, GSE and MPE health, and the pcap and TUN status;
 - the Overview shows the detected content per ISI;
 - in TS mode, the PID table describes each PID.
 
-Turn on pcap extraction under **Outputs → Extract IP to pcap**.
+Turn on IP output under **Outputs → Write IP to pcap** and **Outputs → Send IP to network interface**.
 
 ![Services tab](docs/screenshot-services.png)
 ![IP / GSE tab](docs/screenshot-ip-gse.png)
@@ -314,6 +343,7 @@ Generators for the content processing:
 ./build/tbs-make-test-stream --gse --hem --dfl 3000 --out hem.ts
 ./build/tbs-make-test-stream --add-si --in video.ts --out si.ts # adds NIT, EIT now/next, TDT, CAT, BAT
 ./build/tbs-make-test-stream --mis --in video.ts --out mis.ts   # TS on ISI 1 + GSE on ISI 2
+./build/tbs-make-test-stream --mpe --add-si --out mpe.ts        # MPE IP traffic on PID 0x0500
 ```
 
 ## Command line
@@ -341,7 +371,7 @@ tbs-cli --device linux:0:0 --freq 11494 --sr 27500 --out /data/cap.ts --split-si
 ```
 libtbsdvb/include/tbsdvb/   public API (Receiver, Types, Status, Device, Sink, parsers, C API)
 libtbsdvb/src/              implementation; platform/ holds LinuxDvbDevice and WinBdaDevice
-libbbproc/                  tbsbbproc: content detection, PSI/SI, GSE, IP statistics, pcap, capture reader
+libbbproc/                  tbsbbproc: content detection, PSI/SI, GSE, MPE, IP statistics, pcap/pcapng, TUN/TAP, capture reader
 app/                        Qt GUI (theme, widgets, panels, video)
 tools/                      tbs-cli, tbs-bbproc, tbs-make-test-stream, C API example, zmq_receiver.py
 tests/                      unit tests and an end-to-end Receiver test

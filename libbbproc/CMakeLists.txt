@@ -16,6 +16,9 @@ set(TBSBBPROC_PUBLIC_HEADERS
     include/tbsbbproc/PcapWriter.h
     include/tbsbbproc/CaptureFile.h
     include/tbsbbproc/DvbText.h
+    include/tbsbbproc/SectionCollector.h
+    include/tbsbbproc/Mpe.h
+    include/tbsbbproc/TunWriter.h
 )
 set(TBSBBPROC_SOURCES
     src/DvbText.cpp
@@ -27,6 +30,8 @@ set(TBSBBPROC_SOURCES
     src/Processor.cpp
     src/CaptureFile.cpp
     src/Report.cpp
+    src/Mpe.cpp
+    src/TunWriter.cpp
 )
 
 if(TBSBBPROC_BUILD_SHARED)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PsiTypes.h"
+#include "SectionCollector.h"
 #include "export.h"
 
 #include <cstddef>
@@ -34,7 +35,6 @@ public:
     uint64_t packets() const { return m_packets; }
 
 private:
-    struct Collector;
     struct TableKey
     {
         uint8_t tableId;
@@ -54,7 +54,7 @@ private:
     void rebuildPidUsage(TsReport &r) const;
 
     uint64_t m_packets = 0;
-    std::map<uint16_t, std::unique_ptr<Collector>> m_collectors;
+    std::map<uint16_t, SectionCollector> m_collectors;
     std::set<uint16_t> m_pmtPids;
 
     // Decoded state

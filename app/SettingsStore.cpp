@@ -147,6 +147,10 @@ tbs::bb::ProcessorConfig loadProcessing(QSettings &s)
     c.pcap.timestampSuffix = read(s, "pcapTimestampSuffix", d.pcap.timestampSuffix);
     c.pcap.ethernetFraming = read(s, "pcapEthernet", d.pcap.ethernetFraming);
     c.pcap.ipOnly = read(s, "pcapIpOnly", d.pcap.ipOnly);
+    c.pcap.format = readEnum(s, "pcapFormat", d.pcap.format);
+    c.tun.enabled = read(s, "tunEnabled", d.tun.enabled);
+    c.tun.name = readString(s, "tunName", d.tun.name);
+    c.tun.tap = read(s, "tunTap", d.tun.tap);
     s.endGroup();
     return c;
 }
@@ -159,6 +163,10 @@ void saveProcessing(QSettings &s, const tbs::bb::ProcessorConfig &c)
     s.setValue(QStringLiteral("pcapTimestampSuffix"), c.pcap.timestampSuffix);
     s.setValue(QStringLiteral("pcapEthernet"), c.pcap.ethernetFraming);
     s.setValue(QStringLiteral("pcapIpOnly"), c.pcap.ipOnly);
+    writeEnum(s, "pcapFormat", c.pcap.format);
+    s.setValue(QStringLiteral("tunEnabled"), c.tun.enabled);
+    writeString(s, "tunName", c.tun.name);
+    s.setValue(QStringLiteral("tunTap"), c.tun.tap);
     s.endGroup();
 }
 
