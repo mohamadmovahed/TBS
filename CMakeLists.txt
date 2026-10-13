@@ -91,9 +91,26 @@ if(TBS_BUILD_TESTS)
     endif()
     add_test(NAME tbsdvb-core COMMAND tbs-tests)
 
-    # Spectrum / blind scan / constellation against a simulated neumoDVB frontend
-    # (LD_PRELOAD shim; sanitizer runtimes must come first in LD_PRELOAD, so not with those)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CXX_FLAGS MATCHES "sanitize")
+    # Spectrum / blind scan / constellation against a simulated neumoDVB frontend (LD_PRELOAD
+    # shim). A sanitizer runtime must come first in LD_PRELOAD: preload it too (GCC), or skip.
+    set(TBS_SANITIZER_RUNTIME "")
+    set(TBS_SCAN_TEST ON)
+    if(TBS_SANITIZE OR CMAKE_CXX_FLAGS MATCHES "sanitize")
+        set(_san_lib libasan.so)
+        if(CMAKE_CXX_FLAGS MATCHES "sanitize=thread")
+            set(_san_lib libtsan.so)
+        endif()
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=${_san_lib}
+                            OUTPUT_VARIABLE TBS_SANITIZER_RUNTIME OUTPUT_STRIP_TRAILING_WHITESPACE)
+        endif()
+        if(NOT TBS_SANITIZER_RUNTIME OR NOT IS_ABSOLUTE "${TBS_SANITIZER_RUNTIME}")
+            set(TBS_SCAN_TEST OFF)
+        else()
+            set(TBS_SANITIZER_RUNTIME "${TBS_SANITIZER_RUNTIME}:")
+        endif()
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TBS_SCAN_TEST)
         add_library(tbs-fake-frontend SHARED tests/fake_frontend.cpp)
         target_link_libraries(tbs-fake-frontend PRIVATE ${CMAKE_DL_LIBS})
         add_executable(tbs-scan-tests tests/test_scan.cpp)
@@ -101,7 +118,7 @@ if(TBS_BUILD_TESTS)
         add_dependencies(tbs-scan-tests tbs-fake-frontend)
         add_test(NAME tbsdvb-scan COMMAND tbs-scan-tests)
         set_tests_properties(tbsdvb-scan PROPERTIES
-            ENVIRONMENT "LD_PRELOAD=$<TARGET_FILE:tbs-fake-frontend>")
+            ENVIRONMENT "LD_PRELOAD=${TBS_SANITIZER_RUNTIME}$<TARGET_FILE:tbs-fake-frontend>")
     endif()
 
     add_executable(tbs-bbproc-tests tests/test_bbproc.cpp tests/StreamBuilders.h)

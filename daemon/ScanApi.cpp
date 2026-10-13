@@ -291,6 +291,7 @@ http::Response Daemon::startScan(const std::string &kind, const std::string &bod
         m_scanThread = std::thread([=]() {
             Value result = Value::object();
             Value list = Value::array();
+            Value spectra = Value::array(); // blind scan: the spectrum the driver measured
             std::string error;
             for (size_t k = 0; k < pols.size() && error.empty(); ++k) {
                 auto partProgress = [&](double f, const std::string &msg) {
@@ -320,6 +321,7 @@ http::Response Daemon::startScan(const std::string &kind, const std::string &bod
                     req.fftSize = fft;
                     req.maxSymbolRateKsps = maxSr;
                     std::vector<tbs::BlindScanCarrier> found;
+                    tbs::SpectrumResult spec;
                     if (!tbs::Scan::blindScan(dev, req, &found, &error, partProgress,
                                               [&](const tbs::BlindScanCarrier &c) {
                                                   Value m = Value::object();
@@ -328,13 +330,21 @@ http::Response Daemon::startScan(const std::string &kind, const std::string &bod
                                                   m["kind"] = "blind";
                                                   m["carrier"] = carrierJson(c);
                                                   m_server.broadcast(m.dump());
-                                              }))
+                                              },
+                                              &spec))
                         break;
                     for (const auto &c : found)
                         list.push(carrierJson(c));
+                    if (!spec.points.empty())
+                        spectra.push(spectrumJson(spec));
                 }
             }
-            result[kind == "spectrum" ? "spectra" : "carriers"] = list;
+            if (kind == "spectrum") {
+                result["spectra"] = list;
+            } else {
+                result["carriers"] = list;
+                result["spectra"] = spectra;
+            }
             finish(result, error);
         });
         return Response::json(scanJson(false).dump(), 202);

@@ -4,8 +4,8 @@ Software for **TBS 6903x** (STiD135) DVB-S2/S2X receivers, in five parts:
 
 | Part | What it is | Depends on |
 |------|------------|------------|
-| **`tbsdvb`** library (`libtbsdvb/`) | Tunes the card, reads status, captures TS or BBFrames, writes files, publishes over ZeroMQ, streams TS (or single services) over UDP/RTP/SRT, monitors the receiver with alarms. C++17 API plus a C API. | C++17 standard library; optionally libzmq and libsrt. **No Qt.** |
-| **`tbsbbproc`** library (`libbbproc/`) | Processes BBFrames: detects TS or Generic Stream per ISI. Analyses PSI/SI tables of TS streams. Decapsulates GSE and MPE, writes IP to pcap/pcapng or a TUN/TAP interface, keeps IP statistics. | `tbsdvb`; C++17 only. **No Qt, no hardware.** |
+| **`tbsdvb`** library (`libtbsdvb/`) | Tunes the card, reads status, captures TS or BBFrames, writes files, publishes over ZeroMQ, streams TS (or single services) over UDP/RTP/SRT, monitors the receiver with alarms. Spectrum, blind scan and constellation (IQ) with the neumoDVB driver. C++17 API plus a C API. | C++17 standard library; optionally libzmq and libsrt. **No Qt.** |
+| **`tbsbbproc`** library (`libbbproc/`) | Processes BBFrames: detects TS or Generic Stream per ISI. Analyses PSI/SI tables of TS streams. Decapsulates GSE and MPE, writes IP to pcap/pcapng or a TUN/TAP interface, keeps IP statistics. Scans a network transponder by transponder from its NIT. | `tbsdvb`; C++17 only. **No Qt, no hardware.** |
 | **`tbs-receiver`** (`app/`) | Desktop GUI built on the library. | Qt 6 (or 5.15); optionally FFmpeg for video. |
 | **`tbs-daemon`** (`daemon/`) | Headless receiver for servers: JSON config, REST + WebSocket API, web dashboard, systemd unit. | the libraries only |
 | **`tbs-cli`**, **`tbs-bbproc`** (`tools/`) | Command-line capture front end, and offline capture-file analysis. | the libraries only |
@@ -14,7 +14,7 @@ Supported backends:
 
 | Backend | Platform | Notes |
 |---------|----------|-------|
-| Linux DVB API | Linux | TBS open-source driver `linux_media`. Full support, including BBFrames via `stid135 bbframe=1`. |
+| Linux DVB API | Linux | TBS open-source driver `linux_media`. Full support, including BBFrames via `stid135 bbframe=1`. Spectrum, blind scan and constellation need the [neumoDVB driver](#spectrum-blind-scan-and-network-scan) instead. |
 | Windows BDA | Windows | TBS BDA driver through DirectShow. Uses the TBS extensions for LNB power, tone, raw DiSEqC, DVB-S2 parameters and stream ID. |
 | File replay | all | Replays recorded TS or pseudo-TS; for testing without hardware. |
 
@@ -159,6 +159,8 @@ Other public pieces you can use on their own:
 - `TsAnalyzer`, `BbFrameExtractor`, `BbFrameToTs` and `BbHeader` are parsers you can use without a device.
 - `TsFilter` cuts one service (SPTS with a rewritten PAT) or a PID list out of a transport stream.
 - `Monitor` keeps the receiver history and raises alarms (see [Monitoring and alarms](#monitoring-and-alarms)).
+- `Scan::spectrum`, `Scan::blindScan`, `Receiver::constellation` and `bb::runNetworkScan` (see
+  [Spectrum, blind scan and network scan](#spectrum-blind-scan-and-network-scan)).
 - `FileSink`, `ZmqSink`, `TsNetworkSink`, or your own `IOutputSink` via `Receiver::addSink()`.
 
 **Python** (`import tbsdvb`, built when pybind11 is found; installed into `dist-packages`):
@@ -180,6 +182,8 @@ rx.start(cfg)
 print(rx.status().cnr_db, proc.snapshot()["streams"][0]["ts"]["services"])
 open("epg.xml", "w").write(proc.xmltv())
 fmt, snapshot, xmltv = tbsdvb.analyze_capture("recording.ts")   # offline
+scan = tbsdvb.network_scan(rx, proc, [cfg.tuning])            # NIT scan on the running receiver
+carriers = tbsdvb.blind_scan(cfg.device, 10700, 12750, cfg.tuning)  # neumoDVB driver, receiver stopped
 ```
 Callbacks run on the capture threads with the GIL held; an exception in one is reported and the capture
 continues. `python/example.py` is a complete script.
@@ -212,6 +216,11 @@ DLL/.so for other languages.
   polarization, 22 kHz tone, DiSEqC 1.0 port, input stream ID and PLS (root/gold), plus TS or BBFrame capture.
   The tuner IF is computed and checked live. While capturing, change the tuning and press **Apply tuning**
   to retune without stopping.
+* **Presets**: the list above the carrier fields holds saved carriers (frequency, symbol rate, standard,
+  polarization, DiSEqC port, ISI, PLS), shared by all receivers. **+** saves the current carrier, **−** deletes
+  the selected one. The scan dialog can save everything it found as presets.
+* **Scan…** (next to Diagnose) opens the spectrum, blind scan and network scan dialog (see
+  [below](#spectrum-blind-scan-and-network-scan)).
 * **Outputs**:
   * a file: `.ts`, or BBFrames as raw, `0xB8`-prefixed, or the pseudo-TS as received. Recording management:
     * a new file every N MiB and/or N minutes (`name_001.ts`, `name_002.ts`, ...); BBFrame segments start on a
@@ -241,9 +250,11 @@ DLL/.so for other languages.
     genre, age rating), search, and **Export XMLTV…**;
   * Monitor: history chart, alarms and alarm events, alarm settings, CSV export (see below);
   * PIDs: per-PID share bars;
+  * Constellation: IQ scatter plot of the locked carrier (neumoDVB driver);
   * Log.
 * Light/dark toggle in the header. **F5** starts and stops. `--autostart` starts at launch;
-  `--theme light|dark` picks the theme; `--tab NAME` and `--sidebar tuning|outputs` pick the open pages.
+  `--theme light|dark` picks the theme; `--tab NAME` and `--sidebar tuning|outputs` pick the open pages;
+  `--scan` opens the scan dialog.
 
 ## Monitoring and alarms
 
@@ -280,6 +291,48 @@ Alarms also go to the log, and the tab title counts the active ones.
 
 ![Monitor tab](docs/screenshot-monitor.png)
 
+## Spectrum, blind scan and network scan
+
+**Network scan (NIT)** works with every driver and with file replay. Start the receiver on one transponder of
+the network. The scan then:
+1. reads the NIT (network information table);
+2. tunes every transport it lists at the same orbital position (optionally also other networks and other
+   positions);
+3. collects the services of each transport from its SDT.
+
+The result can be tuned directly or saved as presets. In the library it is `tbs::bb::runNetworkScan()`, which
+works on a running `Receiver` that feeds a `Processor`. The satellite delivery descriptors are available as
+structured fields (`TransportInfo::sat`), and `tuningFromNetwork()` turns a NIT into tuning parameters.
+
+**Spectrum, blind scan and constellation** need driver support that the stock TBS driver does not have. They
+use the frontend API extensions of **neumoDVB** (`DTV_SPECTRUM`, `DTV_SCAN`, `DTV_CONSTELLATION`). These come
+with the `deepthought` branch of [deeptho/linux_media](https://github.com/deeptho/linux_media), which drives the
+STiD135 of the TBS 6903x. Support is detected at run time: `tbs-cli --caps`, the scan dialog and
+`GET /api/v1/scan/capabilities` say what the installed driver can do. With the stock driver these features
+report "not supported", and everything else keeps working.
+
+- **Spectrum:** the RF level across a range, per polarization, by FFT or sweep. A universal LNB range across
+  11.7 GHz is measured as two bands, low then high with 22 kHz. Carrier candidates come from the driver, or
+  else from a peak search on the spectrum.
+- **Blind scan:** the driver searches the range and locks each carrier. Each one is reported with its
+  frequency, symbol rate, standard, modulation, FEC, C/N and the input streams of a multistream carrier, ready
+  to tune.
+- **Constellation:** IQ samples of the locked carrier. They are shown live in the GUI's Constellation tab, read
+  with `Receiver::setConstellationSamples()` and `constellation()`, and served by `GET /api/v1/constellation`.
+
+The tuner can do one thing at a time. A spectrum or blind scan therefore needs the receiver stopped; the GUI
+offers to stop it. A network scan uses the running receiver and retunes it to the start transponder at the end.
+
+![Scan dialog: blind scan](docs/screenshot-scan.png)
+
+<details><summary>Network scan and constellation</summary>
+
+![Network scan](docs/screenshot-nit-scan.png)
+
+![Constellation](docs/screenshot-constellation.png)
+
+</details>
+
 ## Headless daemon (`tbs-daemon`)
 
 Runs the receiver, the content processing (tables, EPG, GSE/MPE, IP outputs), all outputs, and the monitor, with
@@ -315,7 +368,11 @@ TOKEN`, or `?token=` for the WebSocket.
 | GET | `epg?isi=N&service=ID`, `epg.xml` | EPG as JSON, or all of it as XMLTV |
 | GET | `ip?isi=N` | IP statistics (GSE/MPE): protocols, top flows |
 | GET | `alarms`, `history?seconds=N`, `history.csv?seconds=N`, `log?lines=N` | monitoring |
-| WS | `ws` | pushes `status` once a second, plus `alarm`, `log` and `state` messages |
+| POST | `scan/spectrum`, `scan/blind` | `{"start": 10700, "end": 12750, "polarization": "h"\|"v"\|"both"}`, plus optional `method`, `resolution`, `fftSize`, `maxSymbolRate` and `tuning` (LNB). Needs the receiver stopped. Answers `202`; one scan at a time |
+| POST | `scan/network` | NIT scan on the running receiver; optional `followNit`, `nitOther`, `allPositions`, `lockTimeoutMs`, `tableTimeoutMs` |
+| GET / POST | `scan`, `scan/cancel` | progress and the result of the last scan (spectra, carriers or transponders with services, each with a `tuning` for `tune`) |
+| GET | `scan/capabilities`, `constellation?samples=N` | driver support; IQ samples of the locked carrier |
+| WS | `ws` | pushes `status` once a second, plus `alarm`, `log`, `state` and `scan` (progress, each carrier or transponder found) messages |
 
 ```sh
 curl -s -H "Authorization: Bearer $T" localhost:8080/api/v1/status | jq .frontend
@@ -324,13 +381,20 @@ curl -s -H "Authorization: Bearer $T" -X PUT -d '{"receiver": {"network": ["udp:
 ```
 
 **Dashboard.** `http://host:8080/` shows lock, level, C/N, bitrate and errors with sparklines, the demodulator,
-alarms, outputs, services and the live log, with start/stop. It follows the system light/dark setting and works
+alarms, outputs, services and the live log, with start/stop. Its Scan card runs the spectrum, blind and network
+scans, draws the spectrum, and tunes a result with one click. It follows the system light/dark setting and works
 on a phone.
 
 **Security.** The server is plain HTTP, meant for a trusted network. Set a token, and put it behind a reverse
 proxy with TLS if it must be reachable from elsewhere.
 
 ![Web dashboard](docs/screenshot-dashboard.png)
+
+<details><summary>Dashboard scan card</summary>
+
+![Dashboard scan](docs/screenshot-dashboard-scan.png)
+
+</details>
 
 ## BBFrames
 
@@ -547,6 +611,18 @@ Generators for the content processing:
 ./build/tbs-make-test-stream --mpe --add-si --out mpe.ts        # MPE IP traffic on PID 0x0500
 ```
 
+**Simulated neumoDVB frontend.** `libtbs-fake-frontend.so` (built with the tests on Linux) is an `LD_PRELOAD`
+shim. It makes `/dev/dvb/adapter97` a DVB-S2 frontend with spectrum, blind scan and IQ support over a fixed
+set of carriers, and its demux plays a file. The scan tests use it, and it is handy for trying the scan features
+on any Linux machine:
+```sh
+./build/tbs-make-test-stream --add-si --in video.ts --out si_bb.ts   # NIT lists four transponders
+export LD_PRELOAD=$PWD/build/libtbs-fake-frontend.so FAKE_DVB_TS=$PWD/si_bb.ts
+./build/tbs-cli --device linux:97 --blindscan 10700-12750 --pol both
+FAKE_DVB_ADAPTER=7 ./build/app/tbs-receiver --scan          # GUI: select Linux DVB, adapter 7, BBFrames
+```
+(The GUI's adapter field goes up to 63, hence `FAKE_DVB_ADAPTER=7` there.)
+
 ## Command line
 
 ```
@@ -560,6 +636,14 @@ Stream service 101 as multicast and the whole TS to an SRT listener at the same 
 ```
 tbs-cli --device linux:0:0 --freq 11494 --sr 27500 --pol h \
         --net "udp://239.1.1.1:1234?program=101" --net "srt://:9000?mode=listener"
+```
+
+Scanning:
+```
+tbs-cli --device linux:0 --caps                                      # what the driver supports
+tbs-cli --device linux:0 --spectrum 10700-12750 --pol both --csv spectrum.csv
+tbs-cli --device linux:0 --blindscan 10700-12750 --pol both
+tbs-cli --device linux:0 --freq 11494 --sr 27500 --pol h --nit-scan  # services of the whole network
 ```
 
 Rolling recording, for example 1 GiB files, keeping the last 24, and stopping below 2 GiB free:
@@ -583,6 +667,6 @@ app/                        Qt GUI (theme, widgets, panels, video)
 tools/                      tbs-cli, tbs-bbproc, tbs-make-test-stream, C API example, zmq_receiver.py
 daemon/                     tbs-daemon: JSON config, HTTP/WebSocket server, API, dashboard.html
 packaging/                  systemd unit, example daemon configuration
-tests/                      unit tests, end-to-end Receiver and daemon API tests
+tests/                      unit tests, end-to-end Receiver and daemon API tests, simulated neumoDVB frontend
 cmake/                      find modules, MinGW toolchain
 ```

@@ -48,6 +48,13 @@ td { padding: 4px 6px; border-bottom: 1px solid var(--hairline); vertical-align:
 .kv div:nth-child(odd) { color: var(--muted); }
 #tokenBox { display: none; gap: 8px; align-items: center; }
 input { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--hairline); background: var(--raised); color: var(--ink); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.row input[type=number] { width: 110px; }
+select { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--hairline); background: var(--raised); color: var(--ink); }
+#spectrum { width: 100%; height: 240px; display: block; }
+#spectrum text { fill: var(--muted); font-size: 11px; }
+progress { width: 160px; accent-color: var(--accent); }
+td button { padding: 2px 10px; font-size: 12px; }
 @media (max-width: 600px) { header { padding: 12px 16px; } main { padding: 12px 16px; } }
 </style>
 </head>
@@ -72,6 +79,21 @@ input { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid v
   <section class="card"><h2>Alarms</h2><table><thead><tr><th>Alarm</th><th>State</th><th>Details</th></tr></thead><tbody id="alarms"></tbody></table></section>
   <section class="card"><h2>Outputs</h2><div class="kv" id="outputs"></div><table><thead><tr><th>Network output</th><th>Rate</th><th>State</th></tr></thead><tbody id="network"></tbody></table></section>
   <section class="card"><h2>Services</h2><table><thead><tr><th>ID</th><th>Name</th><th>Now</th></tr></thead><tbody id="services"></tbody></table></section>
+  <section class="card wide"><h2>Scan</h2>
+    <div class="row">
+      <label>From <input id="scanFrom" type="number" value="10700" step="1"> MHz</label>
+      <label>to <input id="scanTo" type="number" value="12750" step="1"> MHz</label>
+      <select id="scanPol" aria-label="Polarization"><option value="h">Horizontal</option><option value="v">Vertical</option><option value="both">Both</option></select>
+      <button id="scanSpectrum">Spectrum</button>
+      <button class="primary" id="scanBlind">Blind scan</button>
+      <button id="scanNetwork" title="Tunes the running receiver to every transport its NIT lists">Network scan</button>
+      <button id="scanCancel" hidden>Cancel</button>
+    </div>
+    <div class="row"><progress id="scanProgress" max="1" value="0" hidden></progress><span class="muted" id="scanStatus">Spectrum and blind scan need the neumoDVB driver and a stopped receiver; the network scan needs a running one.</span>
+      <span class="grow"></span><select id="scanShowPol" hidden aria-label="Polarization shown"></select></div>
+    <svg id="spectrum" hidden aria-label="RF spectrum"></svg>
+    <table><thead id="scanHead"></thead><tbody id="scanRows"></tbody></table>
+  </section>
   <section class="card wide"><h2>Log</h2><div id="log"></div></section>
 </main>
 <script>
@@ -187,6 +209,90 @@ function addLog(time, message) {
   if (atEnd) el.scrollTop = el.scrollHeight;
 }
 
+// ---- Scan ----
+let scanResult = null;
+
+function drawSpectrum(sp) {
+  const svg = $("spectrum");
+  svg.hidden = !sp || sp.points.length < 2;
+  if (svg.hidden) return;
+  const w = svg.clientWidth || 800, h = 240, L = 40, R = 10, T = 16, B = 22;
+  const pts = sp.points, f0 = pts[0][0], f1 = pts[pts.length - 1][0];
+  let lo = Math.min(...pts.map(p => p[1])), hi = Math.max(...pts.map(p => p[1]));
+  const step = [1, 2, 5, 10, 20].find(s => (hi - lo) / s <= 6) || 20;
+  lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+  const x = f => L + (f - f0) / Math.max(1e-9, f1 - f0) * (w - L - R);
+  const y = v => T + (hi - v) / Math.max(1e-9, hi - lo) * (h - T - B);
+  let g = "";
+  for (let v = lo; v <= hi; v += step)
+    g += `<line x1="${L}" x2="${w - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--hairline)"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  const fs = [50, 100, 200, 250, 500, 1000].find(s => (f1 - f0) / s <= Math.max(2, (w - L - R) / 90)) || 1000;
+  for (let f = Math.ceil(f0 / fs) * fs; f <= f1; f += fs) g += `<text x="${x(f)}" y="${h - 6}" text-anchor="middle">${f}</text>`;
+  g += `<text x="${L + 6}" y="${T + 12}">${sp.decibel ? "dB" : "%"}</text>`;
+  const d = pts.map((p, i) => (i ? "L" : "M") + x(p[0]).toFixed(1) + " " + y(p[1]).toFixed(1)).join("");
+  const marks = (scanResult && scanResult.carriers ? scanResult.carriers.filter(c => c.polarization === sp.polarization) : sp.peaks)
+    .map(c => `<path d="M${x(c.frequency) - 5} ${T - 12} L${x(c.frequency) + 5} ${T - 12} L${x(c.frequency)} ${T - 3}Z" fill="var(--accent)"><title>${c.frequency} MHz · ${Math.round(c.symbolRate)} kS/s</title></path>`).join("");
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.innerHTML = g + `<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round"/>` + marks +
+    `<line id="specX" y1="${T}" y2="${h - B}" stroke="var(--muted)" stroke-dasharray="2 2" visibility="hidden"/><text id="specT" y="${T + 12}"></text>`;
+  svg.onmousemove = ev => {
+    const r = svg.getBoundingClientRect(), f = f0 + (ev.clientX - r.left - L) / (w - L - R) * (f1 - f0);
+    let best = pts[0];
+    for (const p of pts) if (Math.abs(p[0] - f) < Math.abs(best[0] - f)) best = p;
+    const lx = x(best[0]);
+    $("specX").setAttribute("x1", lx); $("specX").setAttribute("x2", lx); $("specX").setAttribute("visibility", "visible");
+    const t = $("specT");
+    t.textContent = `${best[0].toFixed(1)} MHz · ${best[1].toFixed(1)} ${sp.decibel ? "dB" : "%"}`;
+    t.setAttribute("x", lx > w / 2 ? lx - 8 : lx + 8); t.setAttribute("text-anchor", lx > w / 2 ? "end" : "start");
+    t.style.fill = "var(--ink)";
+  };
+  svg.onmouseleave = () => { $("specX").setAttribute("visibility", "hidden"); $("specT").textContent = ""; };
+}
+
+function tuneButton(tuning) {
+  return `<button data-tuning='${esc(JSON.stringify(tuning))}'>Tune</button>`;
+}
+
+function showScan(sc) {
+  const running = !!sc.running;
+  $("scanCancel").hidden = !running;
+  for (const b of ["scanSpectrum", "scanBlind", "scanNetwork"]) $(b).disabled = running;
+  $("scanProgress").hidden = !running;
+  $("scanProgress").value = sc.progress || 0;
+  if (sc.message || sc.error) $("scanStatus").textContent = sc.error || sc.message;
+  if (running || !sc.result) return;
+  scanResult = sc.result;
+  const r = sc.result, head = $("scanHead"), rows = $("scanRows");
+  const spectra = r.spectra || [];
+  $("scanShowPol").hidden = spectra.length < 2;
+  $("scanShowPol").innerHTML = spectra.map((s, i) => `<option value="${i}">${s.polarization === "V" ? "Vertical" : "Horizontal"}</option>`).join("");
+  drawSpectrum(spectra[0]);
+  if (r.carriers) {
+    head.innerHTML = "<tr><th>Frequency</th><th>Pol</th><th>Symbol rate</th><th>System</th><th>Modulation</th><th>C/N</th><th>Streams</th><th></th></tr>";
+    rows.innerHTML = r.carriers.map(c => `<tr><td>${c.frequency.toFixed(3)} MHz</td><td>${c.polarization}</td><td>${Math.round(c.symbolRate)} kS/s</td><td>${c.system}</td>` +
+      `<td>${esc((c.modulation || "") + " " + (c.fec || ""))}</td><td>${c.cnr != null ? fmt(c.cnr, 1) + " dB" : "–"}</td><td>${c.isis.length > 1 ? c.isis.join(", ") : "single"}</td><td>${tuneButton(c.tuning)}</td></tr>`).join("") ||
+      `<tr><td colspan="8" class="muted">no carriers found</td></tr>`;
+    $("scanStatus").textContent = sc.error || `${r.carriers.length} carriers`;
+  } else if (r.spectra) {
+    const peaks = spectra.flatMap(s => s.peaks.map(p => Object.assign({pol: s.polarization}, p)));
+    head.innerHTML = "<tr><th>Frequency</th><th>Pol</th><th>Symbol rate (est.)</th><th>Level</th></tr>";
+    rows.innerHTML = peaks.map(p => `<tr><td>${p.frequency.toFixed(1)} MHz</td><td>${p.pol}</td><td>~${p.symbolRate} kS/s</td><td>${fmt(p.level, 1)}</td></tr>`).join("") ||
+      `<tr><td colspan="4" class="muted">no carriers found</td></tr>`;
+    $("scanStatus").textContent = sc.error || `${peaks.length} carrier candidates`;
+  } else if (r.transponders) {
+    head.innerHTML = "<tr><th>Transponder</th><th>Pol</th><th>Symbol rate</th><th>TSID</th><th>Services</th><th></th></tr>";
+    rows.innerHTML = r.transponders.map(t => `<tr><td>${t.tuning.frequencyMHz.toFixed(3)} MHz${t.tuning.isi >= 0 ? " · ISI " + t.tuning.isi : ""}</td><td>${t.tuning.polarization.toUpperCase()}</td>` +
+      `<td>${Math.round(t.tuning.symbolRateKsps)} kS/s</td><td>${t.locked ? t.tsid : "no lock"}</td><td>${esc(t.services.map(s => s.name || s.id).join(", "))}</td><td>${tuneButton(t.tuning)}</td></tr>`).join("");
+    $("scanStatus").textContent = sc.error || `${r.network && r.network.name ? r.network.name + " — " : ""}${r.transponders.length} transponders, ${r.services} services`;
+  }
+}
+
+async function startScan(kind) {
+  const body = {start: +$("scanFrom").value, end: +$("scanTo").value, polarization: $("scanPol").value};
+  try { showScan(await api("scan/" + kind, {method: "POST", body: JSON.stringify(body)})); }
+  catch (e) { $("scanStatus").textContent = e.message; }
+}
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/api/v1/ws${token ? "?token=" + encodeURIComponent(token) : ""}`);
@@ -195,6 +301,7 @@ function connect() {
     if (m.type === "status") showStatus(m);
     else if (m.type === "log") addLog(m.time, m.message);
     else if (m.type === "alarm" || m.type === "state") refreshSlow();
+    else if (m.type === "scan") { if (m.running) showScan(m); else api("scan").then(showScan).catch(() => {}); }
   };
   ws.onclose = () => { setPill($("state"), "", "DISCONNECTED"); setTimeout(connect, 2000); };
 }
@@ -205,6 +312,7 @@ async function init() {
     $("log").textContent = "";
     for (const l of await api("log?lines=200")) addLog(l.time, l.message);
     refreshSlow();
+    api("scan").then(sc => { if (sc.kind) showScan(sc); }).catch(() => {});
     connect();
     setInterval(refreshSlow, 5000);
   } catch (e) {
@@ -217,6 +325,15 @@ $("saveToken").onclick = () => {
   try { localStorage.setItem("tbsToken", token); } catch (e) {}
   $("tokenBox").style.display = "none";
   init();
+};
+$("scanSpectrum").onclick = () => startScan("spectrum");
+$("scanBlind").onclick = () => startScan("blind");
+$("scanNetwork").onclick = () => startScan("network");
+$("scanCancel").onclick = () => api("scan/cancel", {method: "POST"}).catch(() => {});
+$("scanShowPol").onchange = () => drawSpectrum((scanResult.spectra || [])[+$("scanShowPol").value]);
+$("scanRows").onclick = ev => {
+  const b = ev.target.closest("button[data-tuning]");
+  if (b) api("tune", {method: "POST", body: b.dataset.tuning}).then(showStatus).catch(e => alert(e.message));
 };
 $("start").onclick = () => api("start", {method: "POST"}).then(showStatus).catch(e => alert(e.message));
 $("stop").onclick = () => api("stop", {method: "POST"}).then(showStatus).catch(e => alert(e.message));

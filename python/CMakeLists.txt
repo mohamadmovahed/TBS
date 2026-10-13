@@ -15,7 +15,8 @@ if(NOT TBS_PYTHON_INSTALL_DIR)
 endif()
 install(TARGETS tbsdvb_python LIBRARY DESTINATION ${TBS_PYTHON_INSTALL_DIR})
 
-if(TBS_BUILD_TESTS AND TBS_BUILD_TOOLS)
+# Not with sanitizers: the interpreter is not instrumented, so the runtime cannot load first
+if(TBS_BUILD_TESTS AND TBS_BUILD_TOOLS AND NOT TBS_SANITIZE AND NOT CMAKE_CXX_FLAGS MATCHES "sanitize")
     add_test(NAME tbsdvb-python COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_tbsdvb.py
              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(tbsdvb-python PROPERTIES
