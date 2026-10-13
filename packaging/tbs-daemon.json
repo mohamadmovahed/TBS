@@ -1,0 +1,105 @@
+{
+  "api": {
+    "listen": "0.0.0.0:8080",
+    "token": "change-me"
+  },
+  "autostart": true,
+  "monitor": {
+    "bbCrcErrors": true,
+    "bbCrcMaxPerWindow": 0,
+    "bitrateHoldSec": 10,
+    "bitrateMinMbps": 1,
+    "ccErrors": true,
+    "ccMaxPerWindow": 0,
+    "cnrHoldSec": 10,
+    "cnrMinDb": 6,
+    "command": "logger -t tbs-daemon {alarm} {state}: {message}",
+    "drops": true,
+    "historySeconds": 86400,
+    "levelHoldSec": 10,
+    "levelMinDbm": -70,
+    "lowBitrate": false,
+    "lowCnr": false,
+    "lowLevel": false,
+    "noData": true,
+    "noDataHoldSec": 5,
+    "noLock": true,
+    "noLockHoldSec": 3,
+    "outputErrors": true,
+    "windowSec": 60
+  },
+  "processing": {
+    "enabled": true,
+    "pcap": {
+      "enabled": false,
+      "ethernetFraming": true,
+      "format": "pcap",
+      "ipOnly": true,
+      "path": "",
+      "timestampSuffix": true
+    },
+    "tun": {
+      "enabled": false,
+      "name": "tbs0",
+      "tap": false
+    }
+  },
+  "receiver": {
+    "bufferMB": 128,
+    "capture": "ts",
+    "device": {
+      "adapter": 0,
+      "bdaIndex": 0,
+      "bdaPath": "",
+      "demux": 0,
+      "frontend": 0,
+      "kind": "linux",
+      "replayFile": "",
+      "replayLoop": true,
+      "replayRateMbps": 0
+    },
+    "file": {
+      "bbFormat": "raw",
+      "enabled": false,
+      "keepFiles": 24,
+      "minFreeMB": 500,
+      "path": "/var/lib/tbs-daemon/capture.ts",
+      "splitMinutes": 60,
+      "splitSizeMB": 0,
+      "timestampSuffix": true
+    },
+    "network": [
+      {
+        "url": "udp://239.1.1.1:1234?ttl=8",
+        "enabled": true
+      }
+    ],
+    "tuning": {
+      "diseqc": -1,
+      "frequencyMHz": 11494,
+      "isi": -1,
+      "lnb": "universal",
+      "lo1MHz": 9750,
+      "lo2MHz": 10600,
+      "modulation": "auto",
+      "plsCode": 0,
+      "plsMode": "gold",
+      "polarization": "h",
+      "switchMHz": 11700,
+      "symbolRateKsps": 27500,
+      "system": "dvbs2",
+      "tone": "auto"
+    },
+    "zmq": {
+      "bind": true,
+      "enabled": false,
+      "endpoint": "tcp://*:5555",
+      "metadataHeader": false,
+      "sendHwm": 10000,
+      "socket": "pub",
+      "topic": "",
+      "tsPacketsPerMessage": 7
+    }
+  },
+  "restartDelaySec": 10
+}

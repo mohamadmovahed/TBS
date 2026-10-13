@@ -1,13 +1,14 @@
 # TBS Receiver
 
-Software for **TBS 6903x** (STiD135) DVB-S2/S2X receivers, in four parts:
+Software for **TBS 6903x** (STiD135) DVB-S2/S2X receivers, in five parts:
 
 | Part | What it is | Depends on |
 |------|------------|------------|
-| **`tbsdvb`** library (`libtbsdvb/`) | Tunes the card, reads status, captures TS or BBFrames, writes files, publishes over ZeroMQ, streams TS (or single services) over UDP/RTP/SRT. C++17 API plus a C API. | C++17 standard library; optionally libzmq and libsrt. **No Qt.** |
+| **`tbsdvb`** library (`libtbsdvb/`) | Tunes the card, reads status, captures TS or BBFrames, writes files, publishes over ZeroMQ, streams TS (or single services) over UDP/RTP/SRT, monitors the receiver with alarms. C++17 API plus a C API. | C++17 standard library; optionally libzmq and libsrt. **No Qt.** |
 | **`tbsbbproc`** library (`libbbproc/`) | Processes BBFrames: detects TS or Generic Stream per ISI. Analyses PSI/SI tables of TS streams. Decapsulates GSE and MPE, writes IP to pcap/pcapng or a TUN/TAP interface, keeps IP statistics. | `tbsdvb`; C++17 only. **No Qt, no hardware.** |
 | **`tbs-receiver`** (`app/`) | Desktop GUI built on the library. | Qt 6 (or 5.15); optionally FFmpeg for video. |
-| **`tbs-cli`**, **`tbs-bbproc`** (`tools/`) | Headless capture front end, and offline capture-file analysis. | the libraries only |
+| **`tbs-daemon`** (`daemon/`) | Headless receiver for servers: JSON config, REST + WebSocket API, web dashboard, systemd unit. | the libraries only |
+| **`tbs-cli`**, **`tbs-bbproc`** (`tools/`) | Command-line capture front end, and offline capture-file analysis. | the libraries only |
 
 Supported backends:
 
@@ -34,6 +35,7 @@ CMake ≥ 3.16 and a C++17 compiler are required. Everything else is optional an
 | `TBS_BUILD_GUI` | ON | Qt GUI (skipped with a warning if Qt is missing) |
 | `TBS_BUILD_TOOLS` | ON | `tbs-cli`, `tbs-make-test-stream`, `tbs-c-example` |
 | `TBS_BUILD_TESTS` | ON | `ctest` unit and end-to-end tests |
+| `TBS_BUILD_DAEMON` | ON | `tbs-daemon` |
 | `TBS_ENABLE_FFMPEG` | ON | Video preview in the GUI; with Qt 6 Multimedia and libswresample also audio |
 | `TBSDVB_ENABLE_ZMQ` | ON | ZeroMQ sink in the library |
 | `TBSDVB_ENABLE_SRT` | ON | SRT network output (UDP and RTP need nothing extra) |
@@ -137,6 +139,7 @@ Other public pieces you can use on their own:
 - `ITunerDevice` gives low-level device access.
 - `TsAnalyzer`, `BbFrameExtractor`, `BbFrameToTs` and `BbHeader` are parsers you can use without a device.
 - `TsFilter` cuts one service (SPTS with a rewritten PAT) or a PID list out of a transport stream.
+- `Monitor` keeps the receiver history and raises alarms (see [Monitoring and alarms](#monitoring-and-alarms)).
 - `FileSink`, `ZmqSink`, `TsNetworkSink`, or your own `IOutputSink` via `Receiver::addSink()`.
 
 **Threads.** The receiver uses two threads, joined by a bounded buffer (128 MiB by default; set it
@@ -187,10 +190,97 @@ DLL/.so for other languages.
   * Overview: MODCOD, roll-off, stream ID, temperature, TS counters, decoded BBHeader, output status;
   * EPG: services, their programmes by day with the running one highlighted, details (extended text,
     genre, age rating), search, and **Export XMLTV…**;
+  * Monitor: history chart, alarms and alarm events, alarm settings, CSV export (see below);
   * PIDs: per-PID share bars;
   * Log.
 * Light/dark toggle in the header. **F5** starts and stops. `--autostart` starts at launch;
   `--theme light|dark` picks the theme; `--tab NAME` and `--sidebar tuning|outputs` pick the open pages.
+
+## Monitoring and alarms
+
+`tbs::Monitor` (library) is fed from `Receiver::Callbacks::onStats`. It keeps one sample per stats interval for
+24 hours. Each sample holds lock, level, C/N, BER, input and payload bitrate, CC/TEI/sync/BBFrame-CRC errors,
+driver overflows, dropped data and output errors.
+
+It evaluates these alarms:
+
+| Alarm | Raised when | Default |
+|---|---|---|
+| Lock lost | no lock for *N* s | on, 3 s |
+| Low C/N, low level | below a limit for *N* s | off |
+| Low bitrate, no data | input below a limit / zero for *N* s | low bitrate off; no data on, 5 s |
+| CC errors, BBFrame CRC errors | more than *N* in the error window (60 s) | on, 0 |
+| Data dropped | driver overflows or processing too slow | on |
+| Output error | recording stopped, network send errors | on |
+
+**Acting on alarms.** Every change (raised or cleared) goes to a callback, to the event list, and optionally to a
+**command**, which can send mail, call a webhook with curl, or switch to a backup feed. Placeholders are shell
+quoted:
+```
+notify-send "TBS {alarm}" "{state}: {message}"
+curl -s -X POST -d "{alarm} {state} {message} {time}" https://hooks.example/tbs
+```
+
+**In the GUI**, the **Monitor** tab shows:
+- a history chart: C/N, level, input or payload bitrate, or error counts, over 10 min to 24 h, with lock-lost
+  periods shaded and a hover readout;
+- the alarm table and the alarm events;
+- **Alarm settings…** and **Export CSV…**.
+
+Alarms also go to the log, and the tab title counts the active ones.
+
+![Monitor tab](docs/screenshot-monitor.png)
+
+## Headless daemon (`tbs-daemon`)
+
+Runs the receiver, the content processing (tables, EPG, GSE/MPE, IP outputs), all outputs, and the monitor, with
+no GUI, and serves an API and a web dashboard.
+
+```sh
+tbs-daemon --print-config > tbs-daemon.json     # defaults; edit device, tuning, outputs, alarms
+tbs-daemon --config tbs-daemon.json             # missing file: created with the defaults
+tbs-daemon --config tbs-daemon.json --listen 0.0.0.0:8080 --token "$(openssl rand -hex 16)"
+```
+
+- **Config:** the JSON file holds `receiver` (device, tuning, capture, file, zmq, network outputs as URLs),
+  `processing` (pcap, TUN/TAP), `monitor` (alarm thresholds and command), `api` (listen address, token),
+  `autostart` and `restartDelaySec`. `packaging/tbs-daemon.json` is an example.
+- **Restarts:** when the receiver stops with an error (device gone, driver reloaded), it is restarted after
+  `restartDelaySec`.
+- **Service:** `packaging/tbs-daemon.service` is a systemd unit. It runs as a `tbs` user in the `video` group,
+  with `CAP_NET_ADMIN` only for TUN/TAP.
+
+**API.** All endpoints are under `/api/v1/`. JSON, unless noted. With a token, send `Authorization: Bearer
+TOKEN`, or `?token=` for the WebSocket.
+
+| Method | Path | |
+|---|---|---|
+| GET | `status` | state, demodulator (lock, level, C/N, BER, MODCOD), stream counters, outputs, active alarms |
+| GET / PUT | `config` | whole configuration; PUT may be partial, is validated, saved to the file, and restarts a running receiver |
+| POST | `start`, `stop`, `restart` | receiver control |
+| POST | `tune` | retune without restarting, e.g. `{"frequencyMHz": 11494, "polarization": "h"}` (saved) |
+| GET | `devices` | receivers on this machine |
+| GET | `streams` | per input stream: content, rate, services, EPG and IP counts |
+| GET | `services?isi=N` | services with components, CA, now/next |
+| GET | `epg?isi=N&service=ID`, `epg.xml` | EPG as JSON, or all of it as XMLTV |
+| GET | `ip?isi=N` | IP statistics (GSE/MPE): protocols, top flows |
+| GET | `alarms`, `history?seconds=N`, `history.csv?seconds=N`, `log?lines=N` | monitoring |
+| WS | `ws` | pushes `status` once a second, plus `alarm`, `log` and `state` messages |
+
+```sh
+curl -s -H "Authorization: Bearer $T" localhost:8080/api/v1/status | jq .frontend
+curl -s -H "Authorization: Bearer $T" -X POST -d '{"frequencyMHz": 12188, "symbolRateKsps": 27500}' localhost:8080/api/v1/tune
+curl -s -H "Authorization: Bearer $T" -X PUT -d '{"receiver": {"network": ["udp://239.1.1.1:1234?program=101"]}}' localhost:8080/api/v1/config
+```
+
+**Dashboard.** `http://host:8080/` shows lock, level, C/N, bitrate and errors with sparklines, the demodulator,
+alarms, outputs, services and the live log, with start/stop. It follows the system light/dark setting and works
+on a phone.
+
+**Security.** The server is plain HTTP, meant for a trusted network. Set a token, and put it behind a reverse
+proxy with TLS if it must be reachable from elsewhere.
+
+![Web dashboard](docs/screenshot-dashboard.png)
 
 ## BBFrames
 
@@ -441,6 +531,8 @@ libtbsdvb/src/              implementation (sinks incl. UDP/RTP/SRT); platform/ 
 libbbproc/                  tbsbbproc: content detection, PSI/SI, GSE, MPE, IP statistics, pcap/pcapng, TUN/TAP, capture reader
 app/                        Qt GUI (theme, widgets, panels, video)
 tools/                      tbs-cli, tbs-bbproc, tbs-make-test-stream, C API example, zmq_receiver.py
-tests/                      unit tests and an end-to-end Receiver test
+daemon/                     tbs-daemon: JSON config, HTTP/WebSocket server, API, dashboard.html
+packaging/                  systemd unit, example daemon configuration
+tests/                      unit tests, end-to-end Receiver and daemon API tests
 cmake/                      find modules, MinGW toolchain
 ```

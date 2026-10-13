@@ -228,19 +228,28 @@ bool UdpSender::send(const uint8_t *data, size_t len)
 {
     if (m_fd < 0)
         return false;
+    // A port-unreachable ICMP for an earlier datagram is reported (and cleared) by the next
+    // send, which then sends nothing: UDP has no receiver to wait for, so try once more
+    for (int attempt = 0; attempt < 2; ++attempt) {
 #ifdef _WIN32
-    const int n = ::send(static_cast<SOCKET>(m_fd), reinterpret_cast<const char *>(data), static_cast<int>(len), 0);
+        const int n = ::send(static_cast<SOCKET>(m_fd), reinterpret_cast<const char *>(data), static_cast<int>(len), 0);
+#elif defined(MSG_NOSIGNAL)
+        const ssize_t n = ::send(static_cast<int>(m_fd), data, len, MSG_NOSIGNAL);
 #else
-#ifdef MSG_NOSIGNAL
-    const ssize_t n = ::send(static_cast<int>(m_fd), data, len, MSG_NOSIGNAL);
+        const ssize_t n = ::send(static_cast<int>(m_fd), data, len, 0);
+#endif
+        if (n >= 0 && static_cast<size_t>(n) == len)
+            return true;
+        m_lastErrno = lastSocketError();
+#ifdef _WIN32
+        const bool icmp = m_lastErrno == WSAECONNRESET || m_lastErrno == WSAECONNREFUSED;
 #else
-    const ssize_t n = ::send(static_cast<int>(m_fd), data, len, 0);
+        const bool icmp = m_lastErrno == ECONNREFUSED;
 #endif
-#endif
-    if (n >= 0 && static_cast<size_t>(n) == len)
-        return true;
-    m_lastErrno = lastSocketError();
-    return false;
+        if (!icmp)
+            return false;
+    }
+    return true; // only ICMP feedback: nobody listens on the port, which is not a send error
 }
 
 std::string UdpSender::lastError() const

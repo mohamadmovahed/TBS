@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TBS Receiver</title>
+<style>
+:root {
+  --page: #f1f1ee; --surface: #fcfcfb; --raised: #ffffff; --hairline: #e1e0d9;
+  --ink: #0b0b0b; --ink2: #52514e; --muted: #6e6d68; --accent: #2a78d6;
+  --good: #0a8a0a; --warning: #b57b00; --critical: #c42f2f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0d0d0d; --surface: #1a1a19; --raised: #242422; --hairline: #2f2f2c;
+    --ink: #ffffff; --ink2: #c3c2b7; --muted: #898781; --accent: #3987e5;
+    --good: #2fb52f; --warning: #fab219; --critical: #e05252;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--hairline); background: var(--surface); flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0; }
+header .sub { color: var(--muted); font-size: 12px; }
+.grow { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: var(--raised); border: 1px solid var(--hairline); font-weight: 600; font-size: 12px; }
+.pill[hidden] { display: none; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.good .dot { background: var(--good); } .warn .dot { background: var(--warning); } .crit .dot { background: var(--critical); }
+button { font: inherit; padding: 6px 14px; border-radius: 8px; border: 1px solid var(--hairline); background: var(--raised); color: var(--ink); cursor: pointer; }
+button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+button.danger { background: var(--critical); color: #fff; border-color: transparent; }
+main { padding: 16px; display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); max-width: 1500px; margin: 0 auto; }
+.card { background: var(--surface); border: 1px solid var(--hairline); border-radius: 12px; padding: 12px 14px; min-width: 0; }
+.card h2 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; grid-column: 1 / -1; }
+.tile .v { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tile .u { color: var(--ink2); font-size: 13px; margin-left: 4px; }
+.tile .s { color: var(--muted); font-size: 12px; min-height: 18px; }
+.tile svg { width: 100%; height: 34px; display: block; margin-top: 4px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 4px 6px; border-bottom: 1px solid var(--hairline); }
+td { padding: 4px 6px; border-bottom: 1px solid var(--hairline); vertical-align: top; overflow-wrap: anywhere; }
+.wide { grid-column: 1 / -1; }
+.muted { color: var(--muted); }
+#log { font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; max-height: 260px; overflow: auto; white-space: pre-wrap; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; }
+.kv div:nth-child(odd) { color: var(--muted); }
+#tokenBox { display: none; gap: 8px; align-items: center; }
+input { font: inherit; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--hairline); background: var(--raised); color: var(--ink); }
+@media (max-width: 600px) { header { padding: 12px 16px; } main { padding: 12px 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <div><h1>TBS Receiver</h1><div class="sub" id="tuning">–</div></div>
+  <span class="pill" id="state"><span class="dot"></span><span>connecting</span></span>
+  <span class="pill" id="alarmPill" hidden><span class="dot"></span><span></span></span>
+  <div class="grow"></div>
+  <div id="tokenBox"><input id="token" type="password" placeholder="API token"><button id="saveToken">Use token</button></div>
+  <button class="primary" id="start">Start</button>
+  <button class="danger" id="stop">Stop</button>
+</header>
+<main>
+  <div class="tiles">
+    <div class="card tile"><h2>Signal level</h2><div><span class="v" id="level">–</span><span class="u">dBm</span></div><div class="s" id="levelSub"></div></div>
+    <div class="card tile"><h2>C/N</h2><div><span class="v" id="cnr">–</span><span class="u">dB</span></div><div class="s" id="cnrSub"></div><svg id="cnrSpark" aria-label="C/N, last 10 minutes"></svg></div>
+    <div class="card tile"><h2>Input bitrate</h2><div><span class="v" id="rate">–</span><span class="u">Mbit/s</span></div><div class="s" id="rateSub"></div><svg id="rateSpark" aria-label="Input bitrate, last 10 minutes"></svg></div>
+    <div class="card tile"><h2>Errors</h2><div><span class="v" id="errors">–</span><span class="u">CC</span></div><div class="s" id="errorsSub"></div></div>
+  </div>
+  <section class="card"><h2>Demodulator</h2><div class="kv" id="demod"></div></section>
+  <section class="card"><h2>Alarms</h2><table><thead><tr><th>Alarm</th><th>State</th><th>Details</th></tr></thead><tbody id="alarms"></tbody></table></section>
+  <section class="card"><h2>Outputs</h2><div class="kv" id="outputs"></div><table><thead><tr><th>Network output</th><th>Rate</th><th>State</th></tr></thead><tbody id="network"></tbody></table></section>
+  <section class="card"><h2>Services</h2><table><thead><tr><th>ID</th><th>Name</th><th>Now</th></tr></thead><tbody id="services"></tbody></table></section>
+  <section class="card wide"><h2>Log</h2><div id="log"></div></section>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let token = "";
+try { token = localStorage.getItem("tbsToken") || ""; } catch (e) {}
+const fmt = (v, d) => (v === null || v === undefined || Number.isNaN(v)) ? "–" : Number(v).toFixed(d);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+
+async function api(path, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers || {}, token ? {Authorization: "Bearer " + token} : {});
+  const r = await fetch("/api/v1/" + path, opts);
+  if (r.status === 401) { $("tokenBox").style.display = "flex"; throw new Error("unauthorized"); }
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || r.statusText);
+  return body;
+}
+
+function setPill(el, cls, text) {
+  el.className = "pill " + cls;
+  el.lastElementChild.textContent = text;
+}
+
+// Sparkline: one series, 2px line in the accent colour, hover shows the value in the tile subtitle
+function spark(svg, points, key, unit, digits, sub, zeroBased) {
+  const w = svg.clientWidth || 200, h = 34;
+  const vals = points.map(p => p[key]).filter(v => v !== null && v !== undefined);
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  if (vals.length < 2) { svg.innerHTML = ""; return; }
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (zeroBased) lo = Math.min(0, lo); // rates start at zero
+  if (hi - lo < 1e-6) { hi += 1; lo -= 1; }
+  const t0 = points[0].t, t1 = points[points.length - 1].t || t0 + 1;
+  const x = t => (t - t0) / Math.max(1, t1 - t0) * (w - 4) + 2;
+  const y = v => h - 3 - (v - lo) / (hi - lo) * (h - 6);
+  let d = "", open = false;
+  for (const p of points) {
+    const v = p[key];
+    if (v === null || v === undefined) { open = false; continue; }
+    d += (open ? "L" : "M") + x(p.t).toFixed(1) + " " + y(v).toFixed(1);
+    open = true;
+  }
+  svg.innerHTML = `<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>` +
+    `<line id="${svg.id}X" y1="0" y2="${h}" stroke="var(--muted)" stroke-dasharray="2 2" visibility="hidden"/>`;
+  svg.onmousemove = ev => {
+    const r = svg.getBoundingClientRect(), tx = t0 + (ev.clientX - r.left - 2) / (w - 4) * (t1 - t0);
+    let best = points[0];
+    for (const p of points) if (Math.abs(p.t - tx) < Math.abs(best.t - tx)) best = p;
+    const line = $(svg.id + "X");
+    line.setAttribute("x1", x(best.t)); line.setAttribute("x2", x(best.t)); line.setAttribute("visibility", "visible");
+    sub.dataset.hover = "1";
+    sub.textContent = new Date(best.t).toLocaleTimeString() + " · " + fmt(best[key], digits) + " " + unit;
+  };
+  svg.onmouseleave = () => { $(svg.id + "X").setAttribute("visibility", "hidden"); delete sub.dataset.hover; };
+}
+
+function showStatus(s) {
+  $("tuning").textContent = s.tuningText + " · " + (s.capture === "bbframe" ? "BBFrames" : "TS");
+  const fe = s.frontend || {}, st = s.stats || {};
+  if (s.state === "running") setPill($("state"), fe.locked ? "good" : "warn", fe.locked ? "LOCKED" : "NO LOCK");
+  else setPill($("state"), s.error ? "crit" : "", s.error ? "ERROR" : s.state.toUpperCase());
+  $("state").title = s.error || "";
+  $("start").hidden = s.state === "running";
+  $("stop").hidden = s.state !== "running" && !s.wanted;
+  const n = s.alarmsActive || 0;
+  $("alarmPill").hidden = !n;
+  if (n) setPill($("alarmPill"), "crit", n + (n === 1 ? " ALARM" : " ALARMS"));
+
+  $("level").textContent = fmt(fe.levelDbm, 1);
+  $("cnr").textContent = fmt(fe.cnrDb, 1);
+  $("rate").textContent = fmt(st.inputMbps, 2);
+  $("errors").textContent = st.ccErrors ?? "–";
+  if (!$("levelSub").dataset.hover) $("levelSub").textContent = fe.levelPercent != null ? fmt(fe.levelPercent, 0) + " %" : "";
+  if (!$("rateSub").dataset.hover) $("rateSub").textContent = st.bbFrames ? fmt(st.bbFramesPerSec, 0) + " BBFrames/s" : (st.tsPackets ?? 0).toLocaleString() + " TS packets";
+  if (!$("cnrSub").dataset.hover) $("cnrSub").textContent = fe.ber != null ? "BER " + Number(fe.ber).toExponential(1) : "";
+  $("errorsSub").textContent = `TEI ${st.teiErrors ?? 0} · sync ${st.syncLosses ?? 0} · BBFrame CRC ${st.bbCrcErrors ?? 0}`;
+
+  const kv = (el, rows) => el.innerHTML = rows.map(([k, v]) => `<div>${esc(k)}</div><div>${esc(v)}</div>`).join("");
+  kv($("demod"), [["Device", fe.device || "–"], ["Status", fe.flags || "–"], ["System", fe.system || "–"],
+    ["Modulation / FEC", (fe.modulation || "–") + " " + (fe.fec || "")], ["Roll-off / pilots", (fe.rolloff || "–") + " / " + (fe.pilot || "–")],
+    ["Stream ID", fe.streamId >= 0 ? fe.streamId : "–"], ["Temperature", fe.temperatureC != null ? fmt(fe.temperatureC, 1) + " °C" : "–"],
+    ["BBHeader", st.bbHeader || "–"], ["Uptime", s.uptimeSec ? Math.round(s.uptimeSec) + " s" : "–"]]);
+  kv($("outputs"), [["File", st.fileName ? `${st.fileName} · ${(st.fileBytes / 1048576).toFixed(1)} MiB${st.fileStopped ? " · stopped" : ""}` : "off"],
+    ["ZeroMQ", `${st.zmqMessages ?? 0} messages · ${st.zmqDropped ?? 0} dropped`],
+    ["Dropped (slow processing)", (st.pipelineDroppedBytes ?? 0) + " bytes"]]);
+  $("network").innerHTML = (st.network || []).map(o =>
+    `<tr><td>${esc(o.url)}</td><td>${o.active ? fmt(o.mbps, 2) + " Mbit/s" : "–"}</td><td>${esc(o.state)}${o.sendErrors ? " · " + o.sendErrors + " dropped" : ""}</td></tr>`).join("") ||
+    `<tr><td colspan="3" class="muted">none</td></tr>`;
+}
+
+async function refreshSlow() {
+  try {
+    const [alarms, services, history] = await Promise.all([api("alarms"), api("services"), api("history?seconds=600")]);
+    $("alarms").innerHTML = alarms.alarms.filter(a => a.enabled).map(a =>
+      `<tr><td>${esc(a.title)}</td><td style="color:var(${a.active ? "--critical" : "--good"})">● ${a.active ? "ALARM" : "OK"}</td><td>${esc(a.active ? a.message : "")}</td></tr>`).join("");
+    $("services").innerHTML = (services.services || []).map(s =>
+      `<tr><td>${s.serviceId}</td><td>${esc(s.name || "")}</td><td>${esc(s.now ? s.now.name : "")}</td></tr>`).join("") ||
+      `<tr><td colspan="3" class="muted">no services yet</td></tr>`;
+    spark($("cnrSpark"), history, "cnrDb", "dB", 1, $("cnrSub"));
+    spark($("rateSpark"), history, "inputMbps", "Mbit/s", 2, $("rateSub"), true);
+  } catch (e) { /* shown by the status pill */ }
+}
+
+function addLog(time, message) {
+  const el = $("log"), atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+  const line = document.createElement("div");
+  line.textContent = new Date(time).toLocaleTimeString() + "  " + message;
+  if (/^(ERROR|ALARM)/.test(message)) line.style.color = "var(--critical)";
+  else if (/^WARNING/.test(message)) line.style.color = "var(--warning)";
+  el.appendChild(line);
+  while (el.childElementCount > 500) el.firstChild.remove();
+  if (atEnd) el.scrollTop = el.scrollHeight;
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${proto}//${location.host}/api/v1/ws${token ? "?token=" + encodeURIComponent(token) : ""}`);
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === "status") showStatus(m);
+    else if (m.type === "log") addLog(m.time, m.message);
+    else if (m.type === "alarm" || m.type === "state") refreshSlow();
+  };
+  ws.onclose = () => { setPill($("state"), "", "DISCONNECTED"); setTimeout(connect, 2000); };
+}
+
+async function init() {
+  try {
+    showStatus(await api("status"));
+    $("log").textContent = "";
+    for (const l of await api("log?lines=200")) addLog(l.time, l.message);
+    refreshSlow();
+    connect();
+    setInterval(refreshSlow, 5000);
+  } catch (e) {
+    setPill($("state"), "crit", e.message === "unauthorized" ? "TOKEN NEEDED" : "UNREACHABLE");
+  }
+}
+
+$("saveToken").onclick = () => {
+  token = $("token").value.trim();
+  try { localStorage.setItem("tbsToken", token); } catch (e) {}
+  $("tokenBox").style.display = "none";
+  init();
+};
+$("start").onclick = () => api("start", {method: "POST"}).then(showStatus).catch(e => alert(e.message));
+$("stop").onclick = () => api("stop", {method: "POST"}).then(showStatus).catch(e => alert(e.message));
+init();
+</script>
+</body>
+</html>

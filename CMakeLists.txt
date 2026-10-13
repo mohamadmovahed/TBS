@@ -14,6 +14,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 option(TBS_BUILD_GUI    "Build the Qt GUI application (tbs-receiver)" ON)
 option(TBS_BUILD_TOOLS  "Build tbs-cli, tbs-make-test-stream and the C API example" ON)
 option(TBS_BUILD_TESTS  "Build unit tests" ON)
+option(TBS_BUILD_DAEMON "Build tbs-daemon (headless receiver with REST/WebSocket API)" ON)
 option(TBS_ENABLE_FFMPEG "Video preview in the GUI (needs FFmpeg)" ON)
 option(TBS_SANITIZE     "Build everything with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 option(TBS_BUILD_FUZZERS "Build the fuzz targets (libFuzzer with Clang; corpus replay otherwise)" OFF)
@@ -53,6 +54,11 @@ if(TBS_BUILD_TOOLS)
     install(TARGETS tbs-cli tbs-make-test-stream tbs-bbproc RUNTIME DESTINATION bin)
 endif()
 
+# ---- Headless daemon ----
+if(TBS_BUILD_DAEMON)
+    add_subdirectory(daemon)
+endif()
+
 # ---- Tests ----
 if(TBS_BUILD_TESTS)
     enable_testing()
@@ -71,6 +77,12 @@ if(TBS_BUILD_TESTS)
     add_executable(tbs-bbproc-tests tests/test_bbproc.cpp tests/StreamBuilders.h)
     target_link_libraries(tbs-bbproc-tests PRIVATE TbsDvb::tbsbbproc)
     add_test(NAME tbsbbproc COMMAND tbs-bbproc-tests)
+
+    if(TBS_BUILD_DAEMON)
+        add_executable(tbs-daemon-tests tests/test_daemon.cpp tests/StreamBuilders.h)
+        target_link_libraries(tbs-daemon-tests PRIVATE tbs-daemon-core)
+        add_test(NAME tbs-daemon COMMAND tbs-daemon-tests)
+    endif()
 endif()
 
 # ---- Fuzzing ----

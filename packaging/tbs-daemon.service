@@ -1,0 +1,32 @@
+# systemd unit for tbs-daemon. Install:
+#   sudo useradd --system --groups video --home-dir /var/lib/tbs-daemon tbs
+#   sudo install -D -m 640 -o tbs packaging/tbs-daemon.json /etc/tbs-daemon/tbs-daemon.json
+#   sudo cp packaging/tbs-daemon.service /etc/systemd/system/ && sudo systemctl enable --now tbs-daemon
+[Unit]
+Description=TBS 6903x receiver daemon (capture, streaming, monitoring, REST API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tbs
+Group=tbs
+# /dev/dvb access
+SupplementaryGroups=video
+ExecStart=/usr/local/bin/tbs-daemon --config /etc/tbs-daemon/tbs-daemon.json
+Restart=on-failure
+RestartSec=5
+# Recordings and the configuration written by PUT /api/v1/config
+StateDirectory=tbs-daemon
+ConfigurationDirectory=tbs-daemon
+ConfigurationDirectoryMode=0750
+# Only needed for the TUN/TAP IP output (processing.tun)
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
