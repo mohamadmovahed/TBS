@@ -1,8 +1,19 @@
 # Python module "tbsdvb" (pybind11). Built into ${CMAKE_BINARY_DIR}/python; installed into the
 # interpreter's site-packages (or TBS_PYTHON_INSTALL_DIR).
-pybind11_add_module(tbsdvb_python MODULE tbsdvb_py.cpp)
+# NO_EXTRAS: pybind11's own strip step does not quote the path and breaks in directories with
+# spaces or parentheses; the module is stripped below instead
+pybind11_add_module(tbsdvb_python MODULE NO_EXTRAS tbsdvb_py.cpp)
 set_target_properties(tbsdvb_python PROPERTIES OUTPUT_NAME tbsdvb LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/python)
 target_link_libraries(tbsdvb_python PRIVATE TbsDvb::tbsdvb TbsDvb::tbsbbproc)
+if(CMAKE_STRIP AND NOT MSVC AND CMAKE_BUILD_TYPE MATCHES "^(Release|MinSizeRel)$")
+    set(_strip_args "")
+    if(APPLE)
+        set(_strip_args -x) # keep the symbols the interpreter looks up
+    endif()
+    add_custom_command(TARGET tbsdvb_python POST_BUILD
+        COMMAND ${CMAKE_STRIP} ${_strip_args} $<TARGET_FILE:tbsdvb_python>
+        VERBATIM)
+endif()
 
 # Relative, so packages relocate: the Debian layout on Linux (on sys.path for the system Python
 # with the /usr prefix), site-packages of the build Python elsewhere

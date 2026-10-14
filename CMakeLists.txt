@@ -125,9 +125,12 @@ if(TBS_BUILD_TESTS)
         add_executable(tbs-scan-tests tests/test_scan.cpp)
         target_link_libraries(tbs-scan-tests PRIVATE TbsDvb::tbsdvb)
         add_dependencies(tbs-scan-tests tbs-fake-frontend)
-        add_test(NAME tbsdvb-scan COMMAND tbs-scan-tests)
+        # LD_PRELOAD splits on spaces and colons and has no quoting: preload the shim by a relative
+        # path from its own directory, so the build directory may contain any character
+        add_test(NAME tbsdvb-scan COMMAND tbs-scan-tests
+                 WORKING_DIRECTORY $<TARGET_FILE_DIR:tbs-fake-frontend>)
         set_tests_properties(tbsdvb-scan PROPERTIES
-            ENVIRONMENT "LD_PRELOAD=${TBS_SANITIZER_RUNTIME}$<TARGET_FILE:tbs-fake-frontend>")
+            ENVIRONMENT "LD_PRELOAD=${TBS_SANITIZER_RUNTIME}./$<TARGET_FILE_NAME:tbs-fake-frontend>")
     endif()
 
     add_executable(tbs-bbproc-tests tests/test_bbproc.cpp tests/StreamBuilders.h)

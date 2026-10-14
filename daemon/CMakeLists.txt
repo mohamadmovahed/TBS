@@ -5,7 +5,8 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/dashboard.html -DOUTPUT=${TBS_DASHBOARD_HEADER}
             -DNAME=kDashboardHtml -P ${CMAKE_CURRENT_SOURCE_DIR}/EmbedFile.cmake
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dashboard.html ${CMAKE_CURRENT_SOURCE_DIR}/EmbedFile.cmake
-    COMMENT "Embedding the daemon dashboard")
+    COMMENT "Embedding the daemon dashboard"
+    VERBATIM)
 
 add_library(tbs-daemon-core STATIC
     Json.cpp Json.h

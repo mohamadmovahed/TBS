@@ -231,6 +231,10 @@ int main()
         std::printf("Skipped: needs the fake frontend (LD_PRELOAD=libtbs-fake-frontend.so)\n");
         return 0;
     }
+    if (!Scan::capabilities(fakeDevice()).probed) {
+        std::fprintf(stderr, "The fake frontend is not loaded (LD_PRELOAD=%s)\n", std::getenv("LD_PRELOAD"));
+        return 1;
+    }
     const std::string ts = (std::filesystem::temp_directory_path() / "tbs_scan_test.ts").string();
     {
         std::ofstream f(ts, std::ios::binary);
