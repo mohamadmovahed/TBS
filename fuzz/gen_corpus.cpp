@@ -236,6 +236,28 @@ int main(int argc, char **argv)
     save(root / "gse", "nm", gseRecords(gseNm, 0x80));
     save(root / "gse", "hem", gseRecords(gseHem, 0x81));
 
+    // fuzz_generic: same record layout; one seed per non-standard variant
+    {
+        std::vector<Bytes> g = sampleGse(12);
+        builders::gseToSplitFragId(g);
+        save(root / "generic", "gse_split", gseRecords(builders::gseToBbFrames(g, 1200, false), 0x84));
+        builders::gseToLengthIncludesHeader(g);
+        save(root / "generic", "gse_len2_split", gseRecords(builders::gseToBbFrames(g, 1200, false), 0x86));
+        std::vector<Bytes> ts;
+        for (int i = 0; i < 12; ++i)
+            ts.push_back(builders::makeTsPacket(0x100, static_cast<uint8_t>(i), static_cast<uint8_t>(i)));
+        save(root / "generic", "ts", gseRecords(builders::streamToGenericFrames(builders::tsPacketStream(ts, false), 700), 0x80));
+        save(root / "generic", "crc_ts", gseRecords(builders::streamToGenericFrames(builders::tsPacketStream(ts, true), 700), 0x80));
+        const uint8_t a[4] = {10, 0, 0, 1}, b[4] = {239, 1, 1, 1};
+        Bytes ip;
+        for (int i = 0; i < 8; ++i) {
+            const Bytes p = builders::makeIpv4(17, a, b, 1, 2, 100 + 50 * i, static_cast<uint8_t>(i));
+            ip.insert(ip.end(), p.begin(), p.end());
+        }
+        save(root / "generic", "ip", gseRecords(builders::streamToGenericFrames(ip, 600), 0x80));
+        save(root / "generic", "ip_swapped", gseRecords(builders::streamToSwappedFrames(ip, 600), 0x80));
+    }
+
     // fuzz_dvbtext
     save(root / "dvbtext", "latin", builders::dvbString("BBC One"));
     save(root / "dvbtext", "arabic", {0x02, 0xC7, 0xE4, 0xD9});

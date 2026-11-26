@@ -65,7 +65,26 @@ std::string formatReport(const ProcessorSnapshot &s, bool verbose)
             o += fmt("BBFrames %llu, data %s%s\n", static_cast<unsigned long long>(st.frames), bytes(st.dataBytes).c_str(),
                      st.hasHeader ? (", MATYPE " + st.lastHeader.summary()).c_str() : "");
 
-        if (st.content == StreamContent::TransportStream || st.content == StreamContent::TsInput) {
+        if (st.decoder != GenericDecoder::None || st.decoderDetected) {
+            o += std::string("Decoder: ") + genericDecoderName(st.decoder)
+                + (st.decoder == GenericDecoder::Auto ? " (probing)" : st.decoderDetected ? " (detected)" : "") + "\n";
+            if (verbose)
+                for (const auto &c : st.decoderScores)
+                    o += fmt("  candidate %-16s %5.1f%%  %llu units\n", genericDecoderId(c.decoder), c.coverage * 100.0,
+                             static_cast<unsigned long long>(c.units));
+        }
+        if (st.frameCrc32)
+            o += fmt("BBFrames with a trailing CRC-32 (removed): %llu\n", static_cast<unsigned long long>(st.frameCrc32));
+        if (st.tsExtract.dataFields)
+            o += fmt("TS in generic stream: packets %llu (verified %llu), CRC-8 errors %llu, sync losses %llu\n",
+                     static_cast<unsigned long long>(st.tsExtract.packets), static_cast<unsigned long long>(st.tsExtract.verified),
+                     static_cast<unsigned long long>(st.tsExtract.crcErrors),
+                     static_cast<unsigned long long>(st.tsExtract.syncLosses));
+        if (st.rawIp.dataFields)
+            o += fmt("Raw IP: packets %llu (%s), skipped %s\n", static_cast<unsigned long long>(st.rawIp.packets),
+                     bytes(st.rawIp.bytes).c_str(), bytes(st.rawIp.skippedBytes).c_str());
+
+        if (isTransportStream(st.content)) {
             const TsReport &t = st.ts;
             o += fmt("TS packets %llu, TSID %u, ONID %u, sections %llu, CRC errors %llu, UTC %s\n",
                      static_cast<unsigned long long>(st.tsPackets), t.tsid, t.onid,

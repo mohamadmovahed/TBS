@@ -416,6 +416,26 @@ Value Daemon::streamsJson()
         s["ipPackets"] = static_cast<unsigned long long>(st.ip.ipv4 + st.ip.ipv6);
         s["gsePdus"] = static_cast<unsigned long long>(st.gse.pdus);
         s["mpeDatagrams"] = static_cast<unsigned long long>(st.mpe.datagrams);
+        if (st.decoder != tbs::bb::GenericDecoder::None || st.decoderDetected) {
+            Value dec = Value::object();
+            dec["id"] = tbs::bb::genericDecoderId(st.decoder);
+            dec["name"] = tbs::bb::genericDecoderName(st.decoder);
+            dec["detected"] = st.decoderDetected;
+            dec["probing"] = st.decoder == tbs::bb::GenericDecoder::Auto;
+            Value cand = Value::array();
+            for (const auto &c : st.decoderScores) {
+                Value x = Value::object();
+                x["id"] = tbs::bb::genericDecoderId(c.decoder);
+                x["coverage"] = c.coverage;
+                x["units"] = static_cast<unsigned long long>(c.units);
+                cand.push(x);
+            }
+            dec["candidates"] = cand;
+            s["decoder"] = dec;
+        }
+        s["frameCrc32"] = static_cast<unsigned long long>(st.frameCrc32);
+        s["rawIpPackets"] = static_cast<unsigned long long>(st.rawIp.packets);
+        s["tsInGsPackets"] = static_cast<unsigned long long>(st.tsExtract.verified);
         arr.push(s);
     }
     return arr;

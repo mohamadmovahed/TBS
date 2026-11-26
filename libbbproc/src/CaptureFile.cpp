@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <vector>
 
 #if defined(_WIN32)
@@ -35,6 +36,24 @@ bool validHeaderAt(const std::vector<uint8_t> &b, size_t pos)
         return false;
     tbs::BbHeader h;
     return h.parse(b.data() + pos) && h.dfl > 0;
+}
+
+// Raw BBFrames that do not start at byte 0 (a cut recording, or a capture with
+// stray bytes between the frames): two headers in a row, at most kGap bytes apart
+bool rawFramesSomewhere(const std::vector<uint8_t> &b, size_t limit)
+{
+    constexpr size_t kGap = 4;
+    const size_t end = std::min(b.size(), limit);
+    for (size_t pos = 0; pos + tbs::BbHeader::kSize <= end; ++pos) {
+        tbs::BbHeader h;
+        if (!h.parse(b.data() + pos) || h.dfl == 0)
+            continue;
+        const size_t next = pos + tbs::BbHeader::kSize + h.dataFieldBytes();
+        for (size_t g = 0; g <= kGap; ++g)
+            if (validHeaderAt(b, next + g))
+                return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -80,8 +99,8 @@ bool readCaptureFile(const std::string &path, const CaptureCallbacks &cb, Captur
         fmt = CaptureFormat::TransportStream; // may turn out to be pseudo-TS below
     } else if (!buf.empty() && buf[0] == 0xB8 && validHeaderAt(buf, 1)) {
         fmt = CaptureFormat::B8BbFrames;
-    } else if (validHeaderAt(buf, 0)) {
-        fmt = CaptureFormat::RawBbFrames;
+    } else if (validHeaderAt(buf, 0) || rawFramesSomewhere(buf, 1u << 16)) {
+        fmt = CaptureFormat::RawBbFrames; // the reader resynchronises on each header
     }
     if (fmt == CaptureFormat::Unknown) {
         std::fclose(f);

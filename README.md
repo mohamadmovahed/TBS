@@ -5,7 +5,7 @@ Software for **TBS 6903x** (STiD135) DVB-S2/S2X receivers, in five parts:
 | Part | What it is | Depends on |
 |------|------------|------------|
 | **`tbsdvb`** library (`libtbsdvb/`) | Tunes the card, reads status, captures TS or BBFrames, writes files, publishes over ZeroMQ, streams TS (or single services) over UDP/RTP/SRT, monitors the receiver with alarms. Spectrum, blind scan and constellation (IQ) with the neumoDVB driver. C++17 API plus a C API. | C++17 standard library; optionally libzmq and libsrt. **No Qt.** |
-| **`tbsbbproc`** library (`libbbproc/`) | Processes BBFrames: detects TS or Generic Stream per ISI. Analyses PSI/SI tables of TS streams. Decapsulates GSE and MPE, writes IP to pcap/pcapng or a TUN/TAP interface, keeps IP statistics. Scans a network transponder by transponder from its NIT. | `tbsdvb`; C++17 only. **No Qt, no hardware.** |
+| **`tbsbbproc`** library (`libbbproc/`) | Processes BBFrames: detects TS or Generic Stream per ISI, including non-standard encapsulations (GSE dialects, TS or raw IP inside a generic stream). Analyses PSI/SI tables of TS streams. Decapsulates GSE and MPE, writes IP to pcap/pcapng or a TUN/TAP interface, keeps IP statistics. Scans a network transponder by transponder from its NIT. | `tbsdvb`; C++17 only. **No Qt, no hardware.** |
 | **`tbs-receiver`** (`app/`) | Desktop GUI built on the library. | Qt 6 (or 5.15); optionally FFmpeg for video. |
 | **`tbs-daemon`** (`daemon/`) | Headless receiver for servers: JSON config, REST + WebSocket API, web dashboard, systemd unit. | the libraries only |
 | **`tbs-cli`**, **`tbs-bbproc`** (`tools/`) | Command-line capture front end, and offline capture-file analysis. | the libraries only |
@@ -447,6 +447,7 @@ Each BBFrame is routed by its MATYPE to a pipeline for its input stream (ISI), s
 | `11` Transport | **Transport stream** | Rebuilds the TS packets, analyses the PSI/SI tables and decapsulates MPE |
 | `01` Generic continuous, `10` GSE-HEM | **GSE (IP)** if the data fields parse as GSE; otherwise *generic continuous (not GSE)* | GSE decapsulation, then IP statistics and pcap |
 | `00` Generic packetized | *Generic packetized* | Counted only |
+| `00`, `01`, `10` with non-standard content | **GSE (IP)**, **Transport stream in a generic stream** or **Raw IP** | See [Non-standard encapsulations](#non-standard-encapsulations) |
 
 A plain TS capture (TS mode) goes through the same table analysis.
 
@@ -474,6 +475,57 @@ A plain TS capture (TS mode) goes through the same table analysis.
   - top flows (addresses, ports, packets, bytes, rate);
   - labels and multicast;
   - the GSE error counters.
+
+### Non-standard encapsulations
+
+Many operators do not follow TS 102 606 / EN 302 307 to the letter. The *Don't Look Up* study (UCSD,
+[ucsdsysnet/dontlookup](https://github.com/ucsdsysnet/dontlookup)) catalogued the variants found on
+geostationary carriers. The library decodes them natively, per input stream:
+
+| Decoder (`--decoder` id) | What is in the data field |
+|---|---|
+| `gse` | Standard GSE (TS 102 606-1) |
+| `gse-len2` | GSE whose GSE_Length also counts the 2-byte fixed header |
+| `gse-split` | GSE whose Frag_ID byte is a 6-bit fragment ID plus a 2-bit counter (reassembled by the 6-bit ID) |
+| `gse-len2-split` | Both of the above |
+| `ts` | 188-byte TS packets (sync byte `0x47`) in a stream not signalled as TS |
+| `crc-ts` | TS packets whose sync byte holds the CRC-8 of the previous packet (the DVB-S compatible framing of EN 302 307 §5.1.4, as sent by e.g. Newtec modulators), in a stream not signalled as TS. SYNCD is not trusted: packets are aligned by the CRC chain |
+| `ip` | IPv4 packets written straight into the data field, no encapsulation (found by their header checksum, across BBFrames) |
+| `ip-swapped` | The same, with every 16-bit word byte-swapped and a 2-byte prefix per data field |
+
+Also handled, independently of the decoder:
+- **BBFrames with a CRC-32 appended** to the data field (MPEG-2 CRC over header and data, initial value 0 or
+  0xFFFFFFFF): the 4 bytes are removed before decoding and counted (`StreamReport::frameCrc32`).
+- **Non-standard GSE fragments**: the reassembly CRC-32 may use initial value 0, and Total_Length is not required to
+  match exactly (the CRC still has to).
+- **Raw BBFrame recordings that do not start on a frame**, or with stray bytes between frames, are recognised.
+
+**Auto detection** (the default, `ProcessorConfig::genericDecoder = GenericDecoder::Auto`): the first data fields of
+each stream (`probeFrames`, default 64) are run through every decoder. Each one is scored by the share of the data it
+explains with *verified* units (IPv4 header checksums, IPv6 lengths, GSE fragment CRCs, TS sync bytes or CRC-8
+chains); trailing zero padding is not counted. The best one wins; on a tie (within 5 %) the more standard one is
+kept, and if none explains at least 25 %, the standard behaviour applies (GSE, or counting only for generic
+packetized streams). A decoder that explains ≥ 90 % after 4 fields is taken at once. The probed fields are held and
+replayed, so nothing is lost. If an auto-detected GSE dialect keeps losing fragments later, detection runs again.
+The result and every candidate's score are in `StreamReport::decoder`, `decoderDetected` and `decoderScores`
+(`tbs-bbproc --verbose`, `GET /api/v1/streams`, Python `snapshot()["streams"][i]["decoder"]`).
+
+TS recovered from a generic stream gets the same PSI/SI, EPG and MPE processing as a signalled TS; IP from every
+variant goes to the same IP statistics, pcap/pcapng (interface `ISI n IP` for raw IP) and TUN/TAP outputs.
+
+```sh
+./build/tbs-bbproc capture.bbf --verbose                    # shows the detected decoder and all candidate scores
+./build/tbs-bbproc capture.bbf --decoder gse-len2 --pcap ip.pcap   # force one
+./build/tbs-make-test-stream --variant crc-ts --add-si --out crc_ts.ts   # test streams for every variant
+./build/tbs-make-test-stream --gse --frame-crc32 --out gse_crc.ts
+```
+In the GUI the choice is under **Outputs → Generic stream decoding**; in the daemon config it is
+`processing.genericDecoder` (plus `probeFrames` and `stripFrameCrc32`). The Overview and the IP / GSE tab name the
+decoder in use.
+
+> The card has to deliver the generic stream as BBFrames for any of this: on the TBS 6903x that is the
+> `stid135 bbframe=1` mode above. (The dontlookup repository also carries a driver patch for the TBS 5927 USB box
+> that does the equivalent there; that device is not supported by this software.)
 
 **MPE** (EN 301 192) in transport streams, both plain TS captures and TS carried in BBFrames:
 - **PIDs:** found automatically from sections with table ID 0x3E (up to 64 PIDs).
@@ -609,6 +661,7 @@ Generators for the content processing:
 ./build/tbs-make-test-stream --add-si --in video.ts --out si.ts # adds NIT, EIT now/next + 2-day schedule, TDT, CAT, BAT
 ./build/tbs-make-test-stream --mis --in video.ts --out mis.ts   # TS on ISI 1 + GSE on ISI 2
 ./build/tbs-make-test-stream --mpe --add-si --out mpe.ts        # MPE IP traffic on PID 0x0500
+./build/tbs-make-test-stream --variant gse-split --out split.ts # non-standard variants (gse-len2, ts-gs, crc-ts, ip, ...)
 ```
 
 **Simulated neumoDVB frontend.** `libtbs-fake-frontend.so` (built with the tests on Linux) is an `LD_PRELOAD`
@@ -662,7 +715,7 @@ tbs-cli --device linux:0:0 --freq 11494 --sr 27500 --out /data/cap.ts --split-si
 ```
 libtbsdvb/include/tbsdvb/   public API (Receiver, Types, Status, Device, Sink, parsers, TsFilter, C API)
 libtbsdvb/src/              implementation (sinks incl. UDP/RTP/SRT); platform/ holds LinuxDvbDevice and WinBdaDevice
-libbbproc/                  tbsbbproc: content detection, PSI/SI, GSE, MPE, IP statistics, pcap/pcapng, TUN/TAP, capture reader
+libbbproc/                  tbsbbproc: content detection, PSI/SI, GSE, MPE, non-standard decoders, IP statistics, pcap/pcapng, TUN/TAP, capture reader
 app/                        Qt GUI (theme, widgets, panels, video)
 tools/                      tbs-cli, tbs-bbproc, tbs-make-test-stream, C API example, zmq_receiver.py
 daemon/                     tbs-daemon: JSON config, HTTP/WebSocket server, API, dashboard.html

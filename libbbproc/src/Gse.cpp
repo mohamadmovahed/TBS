@@ -47,6 +47,15 @@ void GseDecapsulator::reset()
     m_hemSynced = false;
 }
 
+void GseDecapsulator::setDialect(const GseDialect &d)
+{
+    m_dialect = d;
+    for (auto &f : m_frags)
+        f = Fragment();
+    m_carry.clear();
+    m_hemSynced = false;
+}
+
 void GseDecapsulator::pushDataField(const uint8_t *df, size_t len, bool hem, uint16_t syncdBits, const PduCallback &cb)
 {
     ++m_field;
@@ -105,7 +114,14 @@ bool GseDecapsulator::parsePackets(const uint8_t *p, size_t len, bool allowTail,
             ++m_stats.lengthErrors;
             return false;
         }
-        const size_t glen = ((p[pos] & 0x0F) << 8) | p[pos + 1];
+        size_t glen = ((p[pos] & 0x0F) << 8) | p[pos + 1];
+        if (m_dialect.lengthIncludesHeader) {
+            if (glen < 2) {
+                ++m_stats.lengthErrors;
+                return false;
+            }
+            glen -= 2;
+        }
         if (pos + 2 + glen > len) {
             if (allowTail && tail) {
                 tail->assign(p + pos, p + len);
@@ -155,7 +171,7 @@ bool GseDecapsulator::handlePacket(const uint8_t *p, size_t len, const PduCallba
         ++m_stats.lengthErrors;
         return false;
     }
-    const uint8_t fragId = q[0];
+    const uint8_t fragId = m_dialect.splitFragId ? static_cast<uint8_t>(q[0] >> 2) : q[0];
     Fragment &f = m_frags[fragId];
 
     if (s) {
@@ -200,11 +216,16 @@ bool GseDecapsulator::handlePacket(const uint8_t *p, size_t len, const PduCallba
 
     f.active = false;
     const uint32_t crc = u32(dataEnd);
-    if (crc32Mpeg(f.data.data(), f.data.size()) != crc) {
+    // Non-standard encoders were seen computing the CRC-32 with initial value 0
+    const bool crcOk = crc32Mpeg(f.data.data(), f.data.size()) == crc
+        || (!m_dialect.standard() && crc32Mpeg(f.data.data(), f.data.size(), 0) == crc);
+    if (!crcOk) {
         ++m_stats.crcErrors;
         return true;
     }
-    if (f.data.size() < 4 || u16(f.data.data()) + 2u != f.data.size()) {
+    // Standard: Total_Length must match exactly. Non-standard encoders do not
+    // always fill it in consistently; the CRC has already checked the PDU
+    if (f.data.size() < 4 || (m_dialect.standard() && u16(f.data.data()) + 2u != f.data.size())) {
         ++m_stats.lengthErrors;
         return true;
     }

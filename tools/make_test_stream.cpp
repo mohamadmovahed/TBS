@@ -9,12 +9,18 @@
 //       Adds MPE IP traffic (PID 0x0500) to the transport stream before wrapping it.
 //   tbs-make-test-stream --out FILE --mis --in input.ts
 //       Multistream carrier: the TS on ISI 1 and GSE IP traffic on ISI 2.
+//   tbs-make-test-stream --out FILE --variant NAME [--frame-crc32] [--in input.ts] [--pdus N]
+//       Non-standard generic stream encapsulations (see the "Don't Look Up" study):
+//       gse-len2, gse-split, gse-len2-split (GSE dialects), ts-gs, crc-ts (TS inside a
+//       generic stream), ip, ip-swapped (IPv4 straight in the data field).
+//       --frame-crc32 appends a CRC-32 to every BBFrame (works with any mode).
 //
 // The output is STiD135 pseudo-TS (PID 0x010E), i.e. what a TBS 6903x delivers with
 // "options stid135 bbframe=1". Add --raw to write raw BBFrames instead.
 
 #include "../tests/StreamBuilders.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -277,6 +283,22 @@ std::vector<Bytes> withMpe(const std::vector<Bytes> &in, size_t datagrams)
     return out;
 }
 
+// --- Plain IPv4 packets for the raw IP variants ---
+Bytes ipTraffic(size_t n)
+{
+    const uint8_t src[4] = {10, 20, 0, 1};
+    const uint8_t grp[4] = {239, 5, 5, 5};
+    const uint8_t host[4] = {192, 168, 77, 9};
+    Bytes out;
+    for (size_t i = 0; i < n; ++i) {
+        const bool tcp = i % 3 == 2;
+        const Bytes ip = builders::makeIpv4(tcp ? 6 : 17, src, tcp ? host : grp, tcp ? 443 : 9000, tcp ? 51000 : 9000,
+                                            tcp ? 1200 : 64 + (i * 37) % 1300, static_cast<uint8_t>(i));
+        out.insert(out.end(), ip.begin(), ip.end());
+    }
+    return out;
+}
+
 std::vector<Bytes> readTs(const std::string &in)
 {
     std::vector<Bytes> packets;
@@ -309,6 +331,8 @@ int main(int argc, char **argv)
     bool addSi = false;
     bool mpe = false;
     bool raw = false;
+    bool frameCrc = false;
+    std::string variant;
     size_t synthPackets = 20000;
     size_t pdus = 20000;
 
@@ -339,6 +363,10 @@ int main(int argc, char **argv)
             mpe = true;
         else if (a == "--raw")
             raw = true;
+        else if (a == "--variant")
+            variant = next();
+        else if (a == "--frame-crc32")
+            frameCrc = true;
         else if (a == "--packets")
             synthPackets = std::stoul(next());
         else if (a == "--pdus")
@@ -348,13 +376,19 @@ int main(int argc, char **argv)
             break;
         }
     }
-    if (out.empty() || dfl < 16 || dfl > 7264) {
+    static const char *const kVariants[] = {"gse-len2", "gse-split", "gse-len2-split", "ts-gs", "crc-ts", "ip", "ip-swapped"};
+    const bool variantOk = variant.empty()
+        || std::find(std::begin(kVariants), std::end(kVariants), variant) != std::end(kVariants);
+    if (out.empty() || dfl < 16 || dfl > 7264 || !variantOk) {
         std::cerr << "usage: " << argv[0]
                   << " --out FILE [--in input.ts] [--add-si] [--mpe] [--gse] [--mis] [--hem] [--dfl 16..7264] [--packets N]"
-                     " [--pdus N] [--raw]\n";
+                     " [--pdus N] [--raw]\n"
+                     "       [--variant gse-len2|gse-split|gse-len2-split|ts-gs|crc-ts|ip|ip-swapped] [--frame-crc32]\n";
         return 2;
     }
 
+    if (frameCrc)
+        dfl -= 4; // room for the CRC-32: the data field stays within the DVB-S2 maximum
     std::vector<Bytes> frames;
     auto tsFrames = [&]() {
         std::vector<Bytes> packets;
@@ -391,11 +425,40 @@ int main(int argc, char **argv)
         while (gi < g.size())
             frames.push_back(g[gi++]);
         std::cout << " (ISI 1) + " << pdus << " GSE PDUs (ISI 2)";
+    } else if (variant.rfind("gse-", 0) == 0) {
+        auto g = gseTraffic(pdus);
+        if (variant != "gse-len2")
+            builders::gseToSplitFragId(g);
+        if (variant != "gse-split")
+            builders::gseToLengthIncludesHeader(g);
+        frames = builders::gseToBbFrames(g, dfl, hem);
+        std::cout << pdus << " GSE PDUs (" << variant << ")";
+    } else if (variant == "ts-gs" || variant == "crc-ts") {
+        const size_t n = std::max<size_t>(1, synthPackets);
+        std::vector<Bytes> packets;
+        if (!in.empty())
+            packets = readTs(in);
+        else
+            for (size_t i = 0; i < n; ++i)
+                packets.push_back(builders::makeTsPacket(0x0100, static_cast<uint8_t>(i), static_cast<uint8_t>(i * 7)));
+        if (addSi)
+            packets = withSi(packets, 20.0);
+        frames = builders::streamToGenericFrames(builders::tsPacketStream(packets, variant == "crc-ts"), dfl);
+        std::cout << packets.size() << " TS packets in a generic stream (" << variant << ")";
+    } else if (variant == "ip" || variant == "ip-swapped") {
+        const Bytes ip = ipTraffic(pdus);
+        frames = variant == "ip" ? builders::streamToGenericFrames(ip, dfl)
+                                 : builders::streamToSwappedFrames(ip, dfl & ~static_cast<size_t>(1));
+        std::cout << pdus << " raw IPv4 packets (" << variant << ")";
     } else if (gse) {
         frames = builders::gseToBbFrames(gseTraffic(pdus), dfl, hem);
         std::cout << pdus << " GSE PDUs";
     } else {
         frames = tsFrames();
+    }
+    if (frameCrc) {
+        builders::appendFrameCrc32(frames);
+        std::cout << ", CRC-32 appended";
     }
 
     std::ofstream o(out, std::ios::binary);
@@ -415,7 +478,7 @@ int main(int argc, char **argv)
             ++tsOut;
         }
     }
-    std::cout << " -> " << frames.size() << " BBFrames (" << (hem ? "HEM" : "NM") << ", DFL " << dfl * 8 << " bits)";
+    std::cout << " -> " << frames.size() << " BBFrames (" << (hem ? "HEM" : "NM") << ", DFL " << (dfl + (frameCrc ? 4 : 0)) * 8 << " bits)";
     if (!raw)
         std::cout << " -> " << tsOut << " pseudo-TS packets";
     std::cout << "\n";

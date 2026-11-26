@@ -216,6 +216,19 @@ py::dict snapshotDict(const bb::ProcessorSnapshot &s)
         x["mpe"] = py::dict(py::arg("pids") = st.mpe.pids, py::arg("sections") = st.mpe.sections,
                             py::arg("datagrams") = st.mpe.datagrams, py::arg("crc_errors") = st.mpe.crcErrors);
         x["ip"] = ipReportDict(st.ip);
+        py::list cand;
+        for (const auto &c : st.decoderScores)
+            cand.append(py::dict(py::arg("decoder") = bb::genericDecoderId(c.decoder), py::arg("coverage") = c.coverage,
+                                 py::arg("units") = c.units));
+        x["decoder"] = py::dict(py::arg("id") = bb::genericDecoderId(st.decoder),
+                                py::arg("name") = bb::genericDecoderName(st.decoder),
+                                py::arg("detected") = st.decoderDetected, py::arg("candidates") = cand);
+        x["frame_crc32"] = st.frameCrc32;
+        x["raw_ip"] = py::dict(py::arg("packets") = st.rawIp.packets, py::arg("bytes") = st.rawIp.bytes,
+                               py::arg("skipped_bytes") = st.rawIp.skippedBytes);
+        x["ts_in_gs"] = py::dict(py::arg("packets") = st.tsExtract.packets, py::arg("verified") = st.tsExtract.verified,
+                                 py::arg("crc_errors") = st.tsExtract.crcErrors,
+                                 py::arg("sync_losses") = st.tsExtract.syncLosses);
         streams.append(x);
     }
     d["streams"] = streams;
@@ -687,7 +700,17 @@ PYBIND11_MODULE(tbsdvb, m)
         .def_readwrite("decode_mpe", &bb::ProcessorConfig::decodeMpe)
         .def_readwrite("pcap", &bb::ProcessorConfig::pcap)
         .def_readwrite("tun", &bb::ProcessorConfig::tun)
-        .def_readwrite("top_flows", &bb::ProcessorConfig::topFlows);
+        .def_readwrite("top_flows", &bb::ProcessorConfig::topFlows)
+        .def_readwrite("probe_frames", &bb::ProcessorConfig::probeFrames)
+        .def_readwrite("strip_frame_crc32", &bb::ProcessorConfig::stripFrameCrc32)
+        .def_property(
+            "generic_decoder", [](const bb::ProcessorConfig &c) { return std::string(bb::genericDecoderId(c.genericDecoder)); },
+            [](bb::ProcessorConfig &c, const std::string &id) {
+                if (!bb::parseGenericDecoder(id, &c.genericDecoder))
+                    throw std::invalid_argument("unknown decoder '" + id
+                                                + "' (auto, gse, gse-len2, gse-split, gse-len2-split, ts, crc-ts, ip, ip-swapped, none)");
+            },
+            "Generic stream decoder: 'auto' (default) detects standard GSE or a non-standard variant");
 
     py::class_<PyProcessor>(m, "Processor",
                             "Per-ISI content analysis: PSI/SI tables and EPG of TS streams, GSE/MPE IP extraction")
@@ -698,6 +721,8 @@ PYBIND11_MODULE(tbsdvb, m)
                 throw std::runtime_error(err);
         })
         .def("close", [](PyProcessor &p) { p.proc.close(); })
+        .def("finish", [](PyProcessor &p) { p.proc.finish(); },
+             "End of input: decide generic stream decoders still being auto-detected")
         .def("push_bbframe", [](PyProcessor &p, py::bytes frame, const BbHeader &h) {
             const std::string s = frame;
             p.proc.pushBbFrame(reinterpret_cast<const uint8_t *>(s.data()), s.size(), h);

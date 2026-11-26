@@ -110,9 +110,8 @@ inline std::vector<Bytes> bbFrameToPseudoTs(const Bytes &frame, uint8_t &cc, uin
 // GSE / IP builders
 // ---------------------------------------------------------------------------
 
-inline uint32_t crc32Mpeg(const uint8_t *p, size_t n)
+inline uint32_t crc32Mpeg(const uint8_t *p, size_t n, uint32_t crc = 0xFFFFFFFFu)
 {
-    uint32_t crc = 0xFFFFFFFFu;
     for (size_t i = 0; i < n; ++i) {
         crc ^= static_cast<uint32_t>(p[i]) << 24;
         for (int b = 0; b < 8; ++b)
@@ -289,6 +288,94 @@ inline std::vector<Bytes> gseToBbFrames(const std::vector<Bytes> &packets, size_
         frames.push_back(makeBbFrame(matype1, matype2, 0, df, syncd, 0, true));
     }
     return frames;
+}
+
+// ---------------------------------------------------------------------------
+// Non-standard generic stream encapsulations (as found by the "Don't Look Up"
+// study, github.com/ucsdsysnet/dontlookup)
+// ---------------------------------------------------------------------------
+
+// GSE_Length counts the 2-byte fixed header as well
+inline void gseToLengthIncludesHeader(std::vector<Bytes> &packets)
+{
+    for (Bytes &g : packets) {
+        const size_t len = (((g[0] & 0x0F) << 8) | g[1]) + 2;
+        g[0] = static_cast<uint8_t>((g[0] & 0xF0) | ((len >> 8) & 0x0F));
+        g[1] = static_cast<uint8_t>(len);
+    }
+}
+
+// Frag_ID = 6-bit ID + 2-bit counter that advances with each fragment of a PDU
+inline void gseToSplitFragId(std::vector<Bytes> &packets)
+{
+    uint8_t counter = 0;
+    for (Bytes &g : packets) {
+        const bool s = g[0] & 0x80, e = g[0] & 0x40;
+        if (s && e)
+            continue;
+        if (s)
+            counter = 0;
+        g[2] = static_cast<uint8_t>((g[2] << 2) | (counter++ & 3));
+    }
+}
+
+// A byte stream cut into generic continuous BBFrames (TS/GS = 01, SIS, CCM, SYNCD 0)
+inline std::vector<Bytes> streamToGenericFrames(const Bytes &stream, size_t dataFieldBytes, uint8_t matype1 = 0x70)
+{
+    std::vector<Bytes> frames;
+    for (size_t off = 0; off < stream.size(); off += dataFieldBytes) {
+        Bytes df(stream.begin() + static_cast<std::ptrdiff_t>(off),
+                 stream.begin() + static_cast<std::ptrdiff_t>(std::min(stream.size(), off + dataFieldBytes)));
+        df.resize(dataFieldBytes, 0);
+        frames.push_back(makeBbFrame(matype1, 0, 0, df, 0, 0));
+    }
+    return frames;
+}
+
+// TS packets back to back; with crcSync the sync byte holds the CRC-8 of the previous packet
+inline Bytes tsPacketStream(const std::vector<Bytes> &packets, bool crcSync)
+{
+    Bytes out;
+    uint8_t prev = 0;
+    for (const Bytes &p : packets) {
+        out.push_back(crcSync ? prev : 0x47);
+        out.insert(out.end(), p.begin() + 1, p.end());
+        prev = BbHeader::crc8(p.data() + 1, 187);
+    }
+    return out;
+}
+
+// Raw IP, 16-bit byte-swapped: each data field is a 2-byte prefix plus the next
+// part of the stream, with the bytes of every 16-bit word swapped
+inline std::vector<Bytes> streamToSwappedFrames(const Bytes &stream, size_t dataFieldBytes)
+{
+    std::vector<Bytes> frames;
+    const size_t chunk = dataFieldBytes - 2;
+    for (size_t off = 0; off < stream.size(); off += chunk) {
+        Bytes df = {0x12, 0x34};
+        df.insert(df.end(), stream.begin() + static_cast<std::ptrdiff_t>(off),
+                  stream.begin() + static_cast<std::ptrdiff_t>(std::min(stream.size(), off + chunk)));
+        df.resize(dataFieldBytes, 0);
+        for (size_t i = 0; i + 1 < df.size(); i += 2)
+            std::swap(df[i], df[i + 1]);
+        frames.push_back(makeBbFrame(0x70, 0, 0, df, 0, 0));
+    }
+    return frames;
+}
+
+// Appends a CRC-32/MPEG-2 (initial value 0) over BBHeader + data field to each frame
+inline void appendFrameCrc32(std::vector<Bytes> &frames)
+{
+    for (Bytes &f : frames) {
+        const bool hem = (BbHeader::crc8(f.data(), 9) ^ f[9]) == 1;
+        const uint16_t dfl = static_cast<uint16_t>(((f[4] << 8) | f[5]) + 32);
+        f[4] = static_cast<uint8_t>(dfl >> 8);
+        f[5] = static_cast<uint8_t>(dfl);
+        f[9] = static_cast<uint8_t>(BbHeader::crc8(f.data(), 9) ^ (hem ? 1 : 0));
+        const uint32_t crc = crc32Mpeg(f.data(), f.size(), 0);
+        for (int k = 3; k >= 0; --k)
+            f.push_back(static_cast<uint8_t>(crc >> (8 * k)));
+    }
 }
 
 // ---------------------------------------------------------------------------

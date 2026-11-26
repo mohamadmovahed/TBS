@@ -185,8 +185,8 @@ void IpPanel::updateSnapshot(const ProcessorSnapshot &snap)
     std::vector<int> isis;
     std::vector<const StreamReport *> reports;
     for (const auto &s : snap.streams) {
-        if (s.content == StreamContent::Gse || s.content == StreamContent::GenericContinuous || s.gse.pdus > 0
-            || s.mpe.datagrams > 0) {
+        if (s.content == StreamContent::Gse || s.content == StreamContent::GenericContinuous
+            || s.content == StreamContent::RawIp || s.gse.pdus > 0 || s.mpe.datagrams > 0 || s.rawIp.packets > 0) {
             isis.push_back(s.isi);
             reports.push_back(&s);
         }
@@ -254,8 +254,16 @@ void IpPanel::updateSnapshot(const ProcessorSnapshot &snap)
         if (r.mpe.scrambled)
             parts << tr("scrambled %1").arg(count(r.mpe.scrambled));
     }
-    if (!isMpe || g.dataFields) {
-        parts << QStringLiteral("<b>%1</b>").arg(isGse ? tr("GSE detected") : tr("Generic stream (not GSE)"));
+    const bool isRawIp = r.content == StreamContent::RawIp;
+    if (isRawIp) {
+        parts << QStringLiteral("<b>%1</b>").arg(QString::fromLatin1(tbs::bb::genericDecoderName(r.decoder)));
+        parts << tr("IPv4 packets %1").arg(count(r.rawIp.packets));
+        parts << tr("skipped %1").arg(bytes(r.rawIp.skippedBytes));
+    } else if (!isMpe || g.dataFields) {
+        const bool nonStandard = isGse && r.decoder != tbs::bb::GenericDecoder::Gse;
+        parts << QStringLiteral("<b>%1</b>")
+                     .arg(nonStandard ? QString::fromLatin1(tbs::bb::genericDecoderName(r.decoder))
+                                      : isGse ? tr("GSE detected") : tr("Generic stream (not GSE)"));
         parts << tr("data fields %1 (%2 valid)").arg(count(g.dataFields), count(g.validDataFields));
         parts << tr("GSE packets %1").arg(count(g.packets));
         parts << tr("reassembled %1").arg(count(g.reassembled));
@@ -263,6 +271,8 @@ void IpPanel::updateSnapshot(const ProcessorSnapshot &snap)
         parts << tr("labels 6B/3B/bcast/re-use %1/%2/%3/%4")
                      .arg(count(g.labelTypes[0]), count(g.labelTypes[1]), count(g.labelTypes[2]), count(g.labelTypes[3]));
     }
+    if (r.frameCrc32)
+        parts << tr("BBFrame CRC-32 %1").arg(count(r.frameCrc32));
     if (ip.nonIp)
         parts << tr("non-IP %1").arg(count(ip.nonIp));
     m_gse->setText(parts.join(QStringLiteral(" &nbsp;·&nbsp; ")));

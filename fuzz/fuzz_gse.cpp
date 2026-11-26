@@ -2,6 +2,7 @@
 // IP statistics and the pcap writer.
 //
 // Record layout: flags(1) syncd(2) len(2) | data field
+// (flags bit 0: HEM; bits 1-2 of the first record: GSE dialect)
 
 #include "FuzzInput.h"
 
@@ -39,6 +40,13 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         const uint8_t flags = in.u8();
         const uint16_t syncd = in.u16();
         const std::vector<uint8_t> df = in.bytes(in.u16() & 0x1FFF);
+        if (fields == 0) {
+            // bits 1-2 of the first record: non-standard dialect
+            tbs::bb::GseDialect d;
+            d.lengthIncludesHeader = flags & 2;
+            d.splitFragId = flags & 4;
+            gse.setDialect(d);
+        }
         gse.pushDataField(df.data(), df.size(), flags & 1, syncd, [&](const tbs::bb::GsePdu &pdu) {
             ip.addPdu(pdu, t);
             pcapEth->write(pdu, t * 1000);

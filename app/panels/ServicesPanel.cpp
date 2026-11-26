@@ -165,7 +165,7 @@ void ServicesPanel::updateSnapshot(const ProcessorSnapshot &snap)
     std::vector<int> isis;
     std::vector<const StreamReport *> reports;
     for (const auto &s : snap.streams) {
-        if (s.content == StreamContent::TransportStream || s.content == StreamContent::TsInput) {
+        if (isTransportStream(s.content)) {
             isis.push_back(s.isi);
             reports.push_back(&s);
         }

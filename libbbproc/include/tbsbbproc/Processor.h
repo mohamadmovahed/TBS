@@ -1,5 +1,6 @@
 #pragma once
 
+#include "GenericDecoders.h"
 #include "Gse.h"
 #include "IpStatistics.h"
 #include "Mpe.h"
@@ -27,14 +28,27 @@ enum class StreamContent {
     GenericContinuous, // generic continuous but not GSE
     GenericPacketized, // TS/GS = 00, UPL != 0
     TsInput,           // the capture was a plain transport stream (no BBFrames)
+    TsInGenericStream, // non-standard: TS packets (plain or CRC-8 sync) in a generic stream
+    RawIp,             // non-standard: IPv4 packets directly in the data field
 };
 
 TBSBBPROC_API const char *streamContentName(StreamContent c);
+// TransportStream, TsInput or TsInGenericStream: StreamReport::ts is filled in
+TBSBBPROC_API bool isTransportStream(StreamContent c);
 
 struct TBSBBPROC_API ProcessorConfig
 {
     bool analyzeTables = true;
-    bool decodeGse = true;
+    bool decodeGse = true;     // decode generic streams at all (GSE and the variants below)
+    // Generic streams (TS/GS = 00, 01, 10). Auto probes standard GSE and the
+    // non-standard variants on the first probeFrames data fields of each stream and
+    // keeps the one that explains most of the data; it falls back to standard GSE
+    // (generic packetized streams: to counting only) when nothing fits.
+    GenericDecoder genericDecoder = GenericDecoder::Auto;
+    unsigned probeFrames = 64;
+    // Some modulators append a CRC-32 to each BBFrame data field. When it matches,
+    // the 4 bytes are removed before decoding (generic streams only).
+    bool stripFrameCrc32 = true;
     bool decodeMpe = true;     // IP in MPE sections of transport streams
     PcapOptions pcap;
     TunOptions tun;            // Linux TUN/TAP output of the decapsulated packets
@@ -55,7 +69,15 @@ struct TBSBBPROC_API StreamReport
     TsReport ts;                 // PSI/SI analysis (TS streams)
     GseStats gse;                // GSE layer (generic streams)
     MpeStats mpe;                // MPE layer (transport streams)
-    IpReport ip;                 // IP statistics (GSE or MPE)
+    IpReport ip;                 // IP statistics (GSE, MPE or raw IP)
+
+    // Generic streams: the decoder in use. Auto while detection is still running.
+    GenericDecoder decoder = GenericDecoder::None;
+    bool decoderDetected = false;          // chosen by auto detection
+    std::vector<DecoderScore> decoderScores; // auto detection result, best first
+    uint64_t frameCrc32 = 0;               // frames with a trailing CRC-32 (removed)
+    TsExtractStats tsExtract;              // TsInGenericStream
+    RawIpStats rawIp;                      // RawIp
 };
 
 struct TBSBBPROC_API ProcessorSnapshot
@@ -87,6 +109,9 @@ public:
 
     // Opens the pcap and TUN/TAP outputs if enabled
     bool open(std::string *error = nullptr);
+    // Ends the input: decides decoders still being probed and processes what they held.
+    // Also called by close().
+    void finish();
     void close();
 
     // One BBFrame: BBHeader + data field

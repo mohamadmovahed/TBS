@@ -34,6 +34,14 @@ const Names<tbs::BbFileFormat> kBbFile = {{tbs::BbFileFormat::Raw, "raw"},
                                            {tbs::BbFileFormat::PseudoTs, "pseudo"}};
 const Names<tbs::ZmqSocketKind> kZmq = {{tbs::ZmqSocketKind::Pub, "pub"}, {tbs::ZmqSocketKind::Push, "push"}};
 const Names<tbs::bb::PcapFormat> kPcap = {{tbs::bb::PcapFormat::Pcap, "pcap"}, {tbs::bb::PcapFormat::PcapNg, "pcapng"}};
+const Names<tbs::bb::GenericDecoder> kDecoder = [] {
+    Names<tbs::bb::GenericDecoder> n;
+    for (int i = 0; i < tbs::bb::kGenericDecoderCount; ++i) {
+        const auto d = static_cast<tbs::bb::GenericDecoder>(i);
+        n.push_back({d, tbs::bb::genericDecoderId(d)});
+    }
+    return n;
+}();
 
 template <typename E>
 const char *nameOf(const Names<E> &names, E v)
@@ -208,6 +216,9 @@ Value toJson(const DaemonConfig &c)
 
     Value pc = Value::object();
     pc["enabled"] = c.processingEnabled;
+    pc["genericDecoder"] = nameOf(kDecoder, c.processing.genericDecoder);
+    pc["probeFrames"] = static_cast<unsigned long long>(c.processing.probeFrames);
+    pc["stripFrameCrc32"] = c.processing.stripFrameCrc32;
     Value pcap = Value::object();
     pcap["enabled"] = c.processing.pcap.enabled;
     pcap["path"] = c.processing.pcap.path;
@@ -349,6 +360,9 @@ bool fromJson(const Value &v, DaemonConfig *out, std::string *error)
     if (ok) {
         Reader p{pc, error};
         p.boolean("enabled", c.processingEnabled);
+        p.enumeration("genericDecoder", kDecoder, c.processing.genericDecoder);
+        p.num("probeFrames", c.processing.probeFrames);
+        p.boolean("stripFrameCrc32", c.processing.stripFrameCrc32);
         Reader pcap{section(pc.get("pcap"), "pcap"), error};
         pcap.boolean("enabled", c.processing.pcap.enabled);
         pcap.str("path", c.processing.pcap.path);

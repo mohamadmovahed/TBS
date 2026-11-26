@@ -149,6 +149,20 @@ OutputPanel::OutputPanel(QWidget *parent)
             addNetRow(dlg.output());
     });
 
+    // ---- Generic stream decoding (standard GSE or a non-standard variant) ----
+    root->addLayout(sectionHeader(tr("Generic stream decoding"), nullptr));
+    auto *gd = makeForm();
+    m_genericDecoder = new QComboBox;
+    for (int i = 0; i < tbs::bb::kGenericDecoderCount; ++i) {
+        const auto dec = static_cast<tbs::bb::GenericDecoder>(i);
+        m_genericDecoder->addItem(QString::fromLatin1(tbs::bb::genericDecoderName(dec)), i);
+    }
+    gd->addRow(keyLabel(tr("Decoder")), m_genericDecoder);
+    root->addLayout(gd);
+    root->addWidget(hintLabel(tr("Auto detect tries standard GSE and the non-standard encapsulations found on real "
+                                 "carriers (GSE dialects, TS or raw IPv4 inside a generic stream) on each input stream, "
+                                 "and keeps the one that fits. Takes effect at the next start.")));
+
     // ---- GSE -> pcap ----
     m_pcapOn = new ToggleSwitch;
     root->addLayout(sectionHeader(tr("Write IP to pcap"), m_pcapOn));
@@ -308,6 +322,7 @@ void OutputPanel::setProcessing(const tbs::bb::ProcessorConfig &cfg)
     m_pcapNonIp->setChecked(!cfg.pcap.ipOnly);
     m_pcapTimestamp->setChecked(cfg.pcap.timestampSuffix);
     m_pcapFormat->setCurrentIndex(m_pcapFormat->findData(static_cast<int>(cfg.pcap.format)));
+    m_genericDecoder->setCurrentIndex(m_genericDecoder->findData(static_cast<int>(cfg.genericDecoder)));
     m_tunOn->setChecked(cfg.tun.enabled && tbs::bb::TunWriter::supported());
     m_tunName->setText(QString::fromStdString(cfg.tun.name));
     m_tunMode->setCurrentIndex(m_tunMode->findData(cfg.tun.tap));
@@ -323,6 +338,7 @@ tbs::bb::ProcessorConfig OutputPanel::processing() const
     cfg.pcap.ipOnly = !m_pcapNonIp->isChecked();
     cfg.pcap.timestampSuffix = m_pcapTimestamp->isChecked();
     cfg.pcap.format = static_cast<tbs::bb::PcapFormat>(m_pcapFormat->currentData().toInt());
+    cfg.genericDecoder = static_cast<tbs::bb::GenericDecoder>(m_genericDecoder->currentData().toInt());
     cfg.tun.enabled = m_tunOn->isChecked() && tbs::bb::TunWriter::supported();
     const QString tunName = m_tunName->text().trimmed();
     cfg.tun.name = tunName.isEmpty() ? std::string("tbs0") : tunName.toStdString();

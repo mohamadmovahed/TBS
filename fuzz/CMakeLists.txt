@@ -5,7 +5,7 @@
 #   other compilers: the same targets are built with a standalone driver that
 #           replays the corpus, so ctest still catches regressions.
 
-set(TBS_FUZZ_TARGETS bbframes pseudots psi gse dvbtext capture tsfilter)
+set(TBS_FUZZ_TARGETS bbframes pseudots psi gse generic dvbtext capture tsfilter)
 set(TBS_FUZZ_CORPUS ${CMAKE_CURRENT_SOURCE_DIR}/corpus)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")

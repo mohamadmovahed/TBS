@@ -134,6 +134,10 @@ void OverviewPanel::updateContent(const tbs::bb::ProcessorSnapshot &snap)
         QString what = QString::fromLatin1(tbs::bb::streamContentName(s.content));
         if (s.mpe.datagrams)
             what += tr(" + MPE (IP)");
+        if (s.decoder == tbs::bb::GenericDecoder::Auto)
+            what += tr(" · detecting encapsulation…");
+        else if (s.decoderDetected && s.decoder != tbs::bb::GenericDecoder::Gse)
+            what += QStringLiteral(" · %1").arg(QString::fromLatin1(tbs::bb::genericDecoderName(s.decoder)));
         parts << (s.isi < 0 ? QStringLiteral("<b>%1</b>").arg(what) : QStringLiteral("ISI %1: <b>%2</b>").arg(s.isi).arg(what));
     }
     if (!parts.isEmpty())

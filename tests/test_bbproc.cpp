@@ -567,6 +567,207 @@ static void testGseErrors()
     CHECK(s.streams[0].content == StreamContent::GenericContinuous);
 }
 
+// ---------------------------------------------------------------------------
+// Non-standard generic stream encapsulations
+
+static void testNonStandard()
+{
+    using builders::Bytes;
+    // GSE dialects: detected, and every PDU recovered
+    for (GenericDecoder want : {GenericDecoder::Gse, GenericDecoder::GseLen2, GenericDecoder::GseSplitFragId,
+                                GenericDecoder::GseLen2SplitFragId}) {
+        size_t pdus = 0, ipBytes = 0;
+        auto packets = buildGsePackets(pdus, ipBytes);
+        const GseDialect dia = gseDialectFor(want);
+        if (dia.splitFragId)
+            builders::gseToSplitFragId(packets);
+        if (dia.lengthIncludesHeader)
+            builders::gseToLengthIncludesHeader(packets);
+        const ProcessorSnapshot s = runFrames(builders::gseToBbFrames(packets, 3000, false));
+        CHECK_EQ(s.streams.size(), 1u);
+        if (s.streams.empty())
+            continue;
+        const StreamReport &r = s.streams[0];
+        CHECK_STR(genericDecoderId(r.decoder), genericDecoderId(want));
+        CHECK(r.decoderDetected);
+        CHECK(r.content == StreamContent::Gse);
+        CHECK_EQ(r.gse.pdus, pdus);
+        CHECK_EQ(r.gse.crcErrors, 0u);
+        CHECK_EQ(r.ip.ipBytes, ipBytes);
+        CHECK(!r.decoderScores.empty() && r.decoderScores[0].coverage > 0.8);
+    }
+
+    // Split Frag ID that only shows after the early decision: whole PDUs first,
+    // then fragmented ones. The decoder is re-detected and later PDUs are recovered.
+    {
+        std::vector<Bytes> packets;
+        uint8_t frag = 0;
+        for (int i = 0; i < 200; ++i) {
+            const Bytes ip = builders::makeIpv4(17, kSrc, kDst, 5000, 6000, i < 100 ? 300 : 2500, static_cast<uint8_t>(i));
+            for (auto &p : builders::gseEncapsulate(ip, 0x0800, 2, nullptr, 1000, static_cast<uint8_t>(frag++ & 0x3F)))
+                packets.push_back(p);
+        }
+        builders::gseToSplitFragId(packets);
+        const ProcessorSnapshot s = runFrames(builders::gseToBbFrames(packets, 3000, false));
+        CHECK(s.streams.size() == 1);
+        if (!s.streams.empty()) {
+            CHECK(s.streams[0].decoder == GenericDecoder::GseSplitFragId);
+            CHECK(s.streams[0].gse.pdus > 150u);
+        }
+    }
+
+    // TS packets in a generic stream, plain and with CRC-8 sync bytes
+    std::vector<Bytes> ts;
+    for (int rep = 0; rep < 5; ++rep)
+        for (const Bytes &p : buildSiPackets())
+            ts.push_back(p);
+    for (bool crc : {false, true}) {
+        const ProcessorSnapshot s = runFrames(builders::streamToGenericFrames(builders::tsPacketStream(ts, crc), 2000));
+        CHECK_EQ(s.streams.size(), 1u);
+        if (s.streams.empty())
+            continue;
+        const StreamReport &r = s.streams[0];
+        CHECK(r.decoder == (crc ? GenericDecoder::CrcTs : GenericDecoder::Ts));
+        CHECK(r.content == StreamContent::TsInGenericStream);
+        CHECK(isTransportStream(r.content));
+        CHECK(r.tsExtract.verified + 2 >= ts.size()); // the last packets may end in zero padding
+        CHECK(r.tsExtract.crcErrors <= 1u); // the zero padding of the last frame
+        CHECK_EQ(r.ts.services.size(), 2u);
+        CHECK(r.ts.patSeen);
+    }
+
+    // CRC-TS that does not start on a packet boundary (exercises the rolling CRC search)
+    for (size_t junk : {1u, 57u, 187u, 300u}) {
+        Bytes stream(junk);
+        for (size_t k = 0; k < junk; ++k)
+            stream[k] = static_cast<uint8_t>(k * 151 + 7);
+        const Bytes body = builders::tsPacketStream(ts, true);
+        stream.insert(stream.end(), body.begin(), body.end());
+        GenericTsExtractor x(true);
+        size_t got = 0;
+        bool syncOk = true;
+        for (size_t off = 0; off < stream.size(); off += 1000) {
+            const size_t n = std::min<size_t>(1000, stream.size() - off);
+            x.pushDataField(stream.data() + off, n, [&](const uint8_t *p) {
+                syncOk = syncOk && p[0] == 0x47;
+                ++got;
+            });
+        }
+        CHECK(syncOk);
+        CHECK_EQ(x.stats().crcErrors, 0u);
+        CHECK_EQ(x.stats().skippedBytes, junk);
+        CHECK(got + 1 >= ts.size()); // the last packet cannot be verified
+    }
+
+    // Raw IPv4 in the data field, straight and byte-swapped
+    Bytes ipStream;
+    size_t ipPackets = 0, ipBytes = 0;
+    for (int i = 0; i < 60; ++i) {
+        const Bytes ip = builders::makeIpv4(i % 2 ? 6 : 17, kSrc, i % 2 ? kDst2 : kDst, 5000, 6000,
+                                            static_cast<size_t>(100 + (i * 97) % 1400), static_cast<uint8_t>(i));
+        ipStream.insert(ipStream.end(), ip.begin(), ip.end());
+        ++ipPackets;
+        ipBytes += ip.size();
+    }
+    for (bool swapped : {false, true}) {
+        const auto frames = swapped ? builders::streamToSwappedFrames(ipStream, 3000)
+                                    : builders::streamToGenericFrames(ipStream, 3000);
+        const ProcessorSnapshot s = runFrames(frames);
+        CHECK_EQ(s.streams.size(), 1u);
+        if (s.streams.empty())
+            continue;
+        const StreamReport &r = s.streams[0];
+        CHECK(r.decoder == (swapped ? GenericDecoder::RawIpSwapped : GenericDecoder::RawIp));
+        CHECK(r.content == StreamContent::RawIp);
+        CHECK_EQ(r.rawIp.packets, ipPackets);
+        CHECK_EQ(r.ip.ipv4, ipPackets);
+        CHECK_EQ(r.ip.ipBytes, ipBytes);
+        CHECK_EQ(r.ip.malformed, 0u);
+        CHECK_EQ(r.ip.flowCount, 2u);
+    }
+
+    // Configured decoder: no detection
+    {
+        ProcessorConfig cfg;
+        cfg.genericDecoder = GenericDecoder::RawIp;
+        const ProcessorSnapshot s = runFrames(builders::streamToGenericFrames(ipStream, 3000), cfg);
+        CHECK(s.streams.size() == 1 && s.streams[0].decoder == GenericDecoder::RawIp && !s.streams[0].decoderDetected);
+        if (!s.streams.empty())
+            CHECK_EQ(s.streams[0].rawIp.packets, ipPackets);
+    }
+
+    // BBFrames with a trailing CRC-32 (normal mode and HEM GSE)
+    for (bool hem : {false, true}) {
+        size_t pdus = 0, bytes = 0;
+        auto frames = builders::gseToBbFrames(buildGsePackets(pdus, bytes), 3000, hem);
+        builders::appendFrameCrc32(frames);
+        const ProcessorSnapshot s = runFrames(frames);
+        CHECK(s.streams.size() == 1);
+        if (s.streams.empty())
+            continue;
+        CHECK_EQ(s.streams[0].frameCrc32, frames.size());
+        CHECK(s.streams[0].content == StreamContent::Gse);
+        CHECK_EQ(s.streams[0].gse.pdus, pdus);
+        CHECK_EQ(s.streams[0].gse.invalidDataFields, 0u);
+    }
+
+    // Generic packetized noise is still only counted
+    {
+        std::vector<Bytes> noise;
+        for (int i = 0; i < 20; ++i) {
+            Bytes df(2000);
+            for (size_t k = 0; k < df.size(); ++k)
+                df[k] = static_cast<uint8_t>(k * 7 + i * 13);
+            noise.push_back(builders::makeBbFrame(0x30, 0, 188 * 8, df, 0, 0));
+        }
+        const ProcessorSnapshot s = runFrames(noise);
+        CHECK(s.streams.size() == 1 && s.streams[0].content == StreamContent::GenericPacketized);
+        if (!s.streams.empty()) {
+            CHECK(s.streams[0].decoder == GenericDecoder::None);
+            CHECK(!s.streams[0].decoderDetected);
+        }
+    }
+
+    // A raw BBFrame recording with stray bytes in front and between frames
+    {
+        size_t pdus = 0, bytes = 0;
+        const auto frames = builders::gseToBbFrames(buildGsePackets(pdus, bytes), 3000, false);
+        std::FILE *f = std::fopen("tbs_test_junk.bbf", "wb");
+        const uint8_t junk[5] = {0x13, 0x37, 0x00, 0x42, 0x99};
+        std::fwrite(junk, 1, sizeof(junk), f);
+        for (const Bytes &fr : frames) {
+            std::fwrite(fr.data(), 1, fr.size(), f);
+            std::fputc(0x00, f);
+        }
+        std::fclose(f);
+        Processor proc;
+        CaptureCallbacks cb;
+        size_t n = 0;
+        cb.onBbFrame = [&](const uint8_t *fr, size_t len, const tbs::BbHeader &h) {
+            ++n;
+            proc.pushBbFrame(fr, len, h);
+        };
+        CaptureFormat detected = CaptureFormat::Unknown;
+        CHECK(readCaptureFile("tbs_test_junk.bbf", cb, &detected, nullptr));
+        CHECK(detected == CaptureFormat::RawBbFrames);
+        CHECK_EQ(n, frames.size());
+        proc.close();
+        const ProcessorSnapshot s = proc.snapshot();
+        CHECK(s.streams.size() == 1 && s.streams[0].gse.pdus == pdus);
+        std::remove("tbs_test_junk.bbf");
+    }
+
+    // Names
+    for (int i = 0; i < kGenericDecoderCount; ++i) {
+        GenericDecoder d = GenericDecoder::Auto;
+        CHECK(parseGenericDecoder(genericDecoderId(static_cast<GenericDecoder>(i)), &d));
+        CHECK(static_cast<int>(d) == i);
+    }
+    CHECK(!parseGenericDecoder("bogus", nullptr));
+    const uint8_t hdr[20] = {0x45, 0, 0, 20, 0, 0, 0x40, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2};
+    CHECK(!validIpv4Header(hdr, 20)); // checksum not filled in
+}
+
 static void testPcap()
 {
     size_t pdus = 0, ipBytes = 0;
@@ -936,6 +1137,7 @@ int main()
     testGse(false);
     testGse(true);
     testGseErrors();
+    testNonStandard();
     testPcap();
     testMultistreamAndFiles();
     testMpe();

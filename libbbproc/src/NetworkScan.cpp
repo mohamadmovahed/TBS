@@ -31,7 +31,7 @@ const StreamReport *pickStream(const ProcessorSnapshot &s, const TuningParams &t
 {
     const StreamReport *best = nullptr;
     for (const StreamReport &r : s.streams) {
-        const bool ts = r.content == StreamContent::TransportStream || r.content == StreamContent::TsInput;
+        const bool ts = isTransportStream(r.content);
         if (!ts)
             continue;
         if (t.inputStreamId >= 0 && r.isi == t.inputStreamId)

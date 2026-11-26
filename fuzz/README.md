@@ -1,14 +1,15 @@
 # Fuzzing
 
 The parsers in `tbsdvb` and `tbsbbproc` process data received off the air, so they
-must survive any input. Six libFuzzer targets cover them:
+must survive any input. These libFuzzer targets cover them:
 
 | Target | What it exercises |
 |---|---|
 | `fuzz_bbframes` | BBFrames into `tbs::bb::Processor`: stream detection, TS recovery, PSI/SI, GSE, IP statistics, reports |
 | `fuzz_pseudots` | Raw bytes as (pseudo-)TS: TS alignment, BBFrame reassembly, BBFrame→TS, PSI/SI |
 | `fuzz_psi` | PSI/SI section parsers, sections both packetised and direct |
-| `fuzz_gse` | GSE decapsulation (normal/HEM), extension headers, IP statistics, pcap writer |
+| `fuzz_gse` | GSE decapsulation (normal/HEM, standard and non-standard dialects), extension headers, IP statistics, pcap writer |
+| `fuzz_generic` | Non-standard generic stream decoders: GSE dialects, TS / CRC-8 TS in a generic stream, raw and byte-swapped IPv4, auto detection |
 | `fuzz_dvbtext` | DVB text decoding |
 | `fuzz_capture` | Capture-file format detection and BBFrame resynchronisation |
 | `fuzz_tsfilter` | Service / PID filter of the network output: PAT/PMT following and PAT rewrite |

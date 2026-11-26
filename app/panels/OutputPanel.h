@@ -93,6 +93,7 @@ private:
     QCheckBox *m_pcapNonIp = nullptr;
     QCheckBox *m_pcapTimestamp = nullptr;
     QComboBox *m_pcapFormat = nullptr;
+    QComboBox *m_genericDecoder = nullptr;
     ToggleSwitch *m_tunOn = nullptr;
     QWidget *m_tunBox = nullptr;
     QLineEdit *m_tunName = nullptr;

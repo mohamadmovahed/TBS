@@ -2,6 +2,7 @@
 #   * stream content detection per ISI (TS, GSE, generic)
 #   * MPEG-2 PSI / DVB SI table analysis
 #   * GSE decapsulation, IP statistics, pcap export
+#   * non-standard generic stream encapsulations (GSE dialects, TS/CRC-TS and raw IP in GS)
 #   * capture file reader (TS, pseudo-TS, raw / 0xB8 BBFrames)
 
 option(TBSBBPROC_BUILD_SHARED "Build tbsbbproc as a shared library" ${TBSDVB_BUILD_SHARED})
@@ -13,6 +14,7 @@ set(TBSBBPROC_PUBLIC_HEADERS
     include/tbsbbproc/PsiTypes.h
     include/tbsbbproc/TsTableAnalyzer.h
     include/tbsbbproc/Gse.h
+    include/tbsbbproc/GenericDecoders.h
     include/tbsbbproc/IpStatistics.h
     include/tbsbbproc/PcapWriter.h
     include/tbsbbproc/CaptureFile.h
@@ -26,6 +28,7 @@ set(TBSBBPROC_SOURCES
     src/PsiNames.cpp
     src/TsTableAnalyzer.cpp
     src/Gse.cpp
+    src/GenericDecoders.cpp
     src/IpStatistics.cpp
     src/PcapWriter.cpp
     src/Processor.cpp

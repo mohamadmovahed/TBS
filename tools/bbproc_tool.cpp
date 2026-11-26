@@ -3,6 +3,7 @@
 //   tbs-bbproc capture.bbf                    report stream content, tables, GSE/IP statistics
 //   tbs-bbproc capture.ts --pcap ip.pcap      also extract GSE IP packets to a pcap file
 //   tbs-bbproc capture.ts --xmltv epg.xml     also export the EPG
+//   tbs-bbproc capture.bbf --decoder gse-len2 force a (non-standard) generic stream decoder
 //
 // Accepts plain TS, the card's pseudo-TS, raw BBFrames and 0xB8-prefixed BBFrames.
 
@@ -10,6 +11,7 @@
 #include "tbsbbproc/Processor.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -39,6 +41,15 @@ int main(int argc, char **argv)
             cfg.pcap.ethernetFraming = false;
         } else if (a == "--all-pdus") {
             cfg.pcap.ipOnly = false;
+        } else if (a == "--decoder" && i + 1 < argc) {
+            if (!tbs::bb::parseGenericDecoder(argv[++i], &cfg.genericDecoder)) {
+                std::fprintf(stderr, "unknown decoder %s\n", argv[i]);
+                return 2;
+            }
+        } else if (a == "--probe-frames" && i + 1 < argc) {
+            cfg.probeFrames = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (a == "--keep-frame-crc") {
+            cfg.stripFrameCrc32 = false;
         } else if (a == "--verbose" || a == "-v") {
             verbose = true;
         } else if (a == "--help" || a == "-h") {
@@ -52,15 +63,24 @@ int main(int argc, char **argv)
         }
     }
     if (input.empty()) {
-        std::printf("Usage: %s CAPTURE [--pcap FILE] [--pcapng] [--raw-ip] [--all-pdus] [--tun NAME [--tap]] [--xmltv FILE] [--verbose]\n"
+        std::string ids;
+        for (int k = 0; k < tbs::bb::kGenericDecoderCount; ++k) {
+            const auto dec = static_cast<tbs::bb::GenericDecoder>(k);
+            ids += std::string("               ") + tbs::bb::genericDecoderId(dec) + ": " + tbs::bb::genericDecoderName(dec) + "\n";
+        }
+        std::printf("Usage: %s CAPTURE [--pcap FILE] [--pcapng] [--raw-ip] [--all-pdus] [--tun NAME [--tap]] [--xmltv FILE]\n"
+                    "       [--decoder ID] [--probe-frames N] [--keep-frame-crc] [--verbose]\n"
                     "  CAPTURE    TS, pseudo-TS, raw BBFrames or 0xB8 BBFrames\n"
                     "  --pcap     write IP packets carried in GSE or MPE to FILE (--pcapng: one interface per stream)\n"
                     "  --tun      replay the IP packets into a Linux TUN (or --tap) interface\n"
                     "  --xmltv    write the EPG (EIT present/following and schedule) as XMLTV\n"
                     "  --raw-ip   pcap with raw IP packets instead of Ethernet framing\n"
                     "  --all-pdus include non-IP PDUs (Ethernet framing only)\n"
-                    "  --verbose  all flows and the table list\n",
-                    argv[0]);
+                    "  --decoder  how generic streams are decoded (default auto: standard GSE or the best non-standard variant)\n%s"
+                    "  --probe-frames  data fields per stream used by the auto detection (default 64)\n"
+                    "  --keep-frame-crc  do not remove a CRC-32 found at the end of BBFrames\n"
+                    "  --verbose  all flows and the table list; detection scores\n",
+                    argv[0], ids.c_str());
         return input.empty() && argc > 1 ? 0 : 2;
     }
 

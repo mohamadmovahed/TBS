@@ -49,6 +49,24 @@ struct TBSBBPROC_API GseStats
     std::map<uint16_t, uint64_t> protocolTypes; // EtherType -> PDUs
 };
 
+// Non-standard GSE variants seen on real carriers (see "Don't Look Up", UCSD 2025:
+// github.com/ucsdsysnet/dontlookup). Standard = ETSI TS 102 606-1.
+struct TBSBBPROC_API GseDialect
+{
+    // GSE_Length counts the 2-byte fixed header too ("hdrlen-2"), instead of only
+    // the bytes after the length field
+    bool lengthIncludesHeader = false;
+    // Frag_ID byte is a 6-bit fragment ID plus a 2-bit counter; fragments are
+    // reassembled by the upper 6 bits only
+    bool splitFragId = false;
+
+    bool standard() const { return !lengthIncludesHeader && !splitFragId; }
+    bool operator==(const GseDialect &o) const
+    {
+        return lengthIncludesHeader == o.lengthIncludesHeader && splitFragId == o.splitFragId;
+    }
+};
+
 // GSE decapsulator for one stream. In normal mode (TS/GS = 01) every data field
 // holds whole GSE packets; in GSE-HEM (TS/GS = 10) packets may continue in the
 // next BBFrame and SYNCD gives the offset of the first packet start.
@@ -60,6 +78,10 @@ public:
     void pushDataField(const uint8_t *df, size_t len, bool hem, uint16_t syncdBits, const PduCallback &cb);
     void reset();
     const GseStats &stats() const { return m_stats; }
+
+    // Keeps the statistics; drops fragments in progress
+    void setDialect(const GseDialect &d);
+    const GseDialect &dialect() const { return m_dialect; }
 
     // Fragments older than this many data fields are discarded
     static constexpr uint64_t kFragmentTimeout = 256;
@@ -78,6 +100,7 @@ private:
     void deliver(uint16_t type, uint8_t labelType, const uint8_t *label, const uint8_t *pdu, size_t len, const PduCallback &cb);
 
     GseStats m_stats;
+    GseDialect m_dialect;
     std::array<Fragment, 256> m_frags;
     uint64_t m_field = 0;
     uint8_t m_lastLabel[6] = {};

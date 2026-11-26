@@ -167,6 +167,9 @@ tbs::bb::ProcessorConfig loadProcessing(QSettings &s)
     c.tun.enabled = read(s, "tunEnabled", d.tun.enabled);
     c.tun.name = readString(s, "tunName", d.tun.name);
     c.tun.tap = read(s, "tunTap", d.tun.tap);
+    if (!tbs::bb::parseGenericDecoder(readString(s, "genericDecoder", tbs::bb::genericDecoderId(d.genericDecoder)),
+                                      &c.genericDecoder))
+        c.genericDecoder = d.genericDecoder;
     s.endGroup();
     return c;
 }
@@ -183,6 +186,7 @@ void saveProcessing(QSettings &s, const tbs::bb::ProcessorConfig &c)
     s.setValue(QStringLiteral("tunEnabled"), c.tun.enabled);
     writeString(s, "tunName", c.tun.name);
     s.setValue(QStringLiteral("tunTap"), c.tun.tap);
+    writeString(s, "genericDecoder", tbs::bb::genericDecoderId(c.genericDecoder));
     s.endGroup();
 }
 
